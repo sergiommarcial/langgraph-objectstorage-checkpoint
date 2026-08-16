@@ -1,0 +1,51 @@
+name: Bug report
+description: Report a problem with langgraph-checkpoint-objectstorage
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: What did you expect instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: A minimal code snippet, if possible
+      render: python
+    validations:
+      required: false
+
+  - type: input
+    id: backend
+    attributes:
+      label: Backend
+      description: local filesystem / S3 / GCS (and fsspec/s3fs/gcsfs version, if relevant)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: langgraph-checkpoint-objectstorage version
+    validations:
+      required: true
+
+  - type: input
+    id: python-version
+    attributes:
+      label: Python version
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Set `LANGGRAPH_CHECKPOINT_OBJECTSTORAGE_LOG_LEVEL=DEBUG` for detail (see the README's Logging section)
+      render: shell
+    validations:
+      required: false
