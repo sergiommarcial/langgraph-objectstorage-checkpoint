@@ -98,29 +98,11 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         Returns:
             A new `ObjectStorageSaver` backed by the resolved filesystem.
         """
-        # fsspec caches filesystem instances globally, keyed by constructor
-        # kwargs -- two savers built from the same URI/credentials would
-        # otherwise share one underlying aiohttp session. That session
-        # binds to whichever event loop first touches it; a second saver
-        # (or this same saver reused from a different loop context) can
-        # then hit "Event loop is closed". skip_instance_cache=True gives
-        # every saver its own filesystem instance so they can never
-        # cross-contaminate.
         storage_options.setdefault("skip_instance_cache", True)
         fs, path = fsspec.core.url_to_fs(conn_string, **storage_options)
         return cls(fs, path)
 
     def _run_sync(self, func, *args, **kwargs):
-        # asyncio.run() opens and tears down a fresh event loop per call,
-        # but s3fs/gcsfs bind their aiohttp session to whatever loop is
-        # running the first time they're used -- a second asyncio.run()
-        # call (a new loop) then breaks with "Event loop is closed"
-        # against that same session. AsyncFileSystem instances already
-        # maintain a persistent background-thread loop (`fs.loop`, what
-        # fsspec's own sync wrappers run on); routing through that instead
-        # keeps every sync call on the one loop the session was bound to.
-        # Non-async-native filesystems (local) have no such persistent
-        # session to misalign, so asyncio.run() is fine there.
         if self._is_async_native:
             return fsspec_sync(self.fs.loop, func, *args, **kwargs)
         return asyncio.run(func(*args, **kwargs))
