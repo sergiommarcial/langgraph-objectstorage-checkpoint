@@ -1,9 +1,11 @@
 # langgraph-checkpoint-objectstorage
 
+[![CI](https://github.com/sergiommarcial/langgraph-objectstorage-checkpoint/actions/workflows/ci.yml/badge.svg)](https://github.com/sergiommarcial/langgraph-objectstorage-checkpoint/actions/workflows/ci.yml)
+
 A [LangGraph](https://github.com/langchain-ai/langgraph) `BaseCheckpointSaver`
-that persists checkpoints to **local filesystem, Google Cloud Storage, or AWS
-S3** — one class, backend chosen by connection string, no infrastructure
-beyond a bucket (or a directory) required.
+that persists checkpoints to local filesystem, Google Cloud Storage, or AWS
+S3. One class, backend picked by connection string, nothing to run beyond a
+bucket (or a directory).
 
 ## Table of contents
 
@@ -22,21 +24,19 @@ beyond a bucket (or a directory) required.
 
 ## Features
 
-- **One class, three backends** — `ObjectStorageSaver.from_conn_string(...)`
-  picks local disk, GCS, or S3 from the URI scheme. No per-backend
-  subclasses to choose between.
-- **Full sync + async support** — every `BaseCheckpointSaver` method, both
+- `ObjectStorageSaver.from_conn_string(...)` picks local disk, GCS, or S3
+  from the URI scheme. No per-backend subclasses.
+- Full sync and async support: every `BaseCheckpointSaver` method, both
   flavors (`get_tuple`/`aget_tuple`, `put`/`aput`, `list`/`alist`,
   `put_writes`/`aput_writes`, `delete_thread`/`adelete_thread`).
-- **Validated against the official contract** — tested with
+- Tested against the official contract with
   [`langgraph-checkpoint-conformance`](https://pypi.org/project/langgraph-checkpoint-conformance/)
-  against all three backends, not just hand-written assertions.
-- **Runtime type checking** on the public API via
-  [typeguard](https://typeguard.readthedocs.io/) — catches integration
-  mistakes (wrong argument types) at the call site.
-- **`py.typed`** — full static type coverage for mypy/pyright.
-- Zero required infra beyond object storage itself: no database, no extra
-  service to run in production.
+  on all three backends, not just hand-written assertions.
+- Runtime type checking on the public API via
+  [typeguard](https://typeguard.readthedocs.io/) catches wrong-argument-type
+  mistakes at the call site.
+- Ships `py.typed` for full static type coverage under mypy/pyright.
+- No database or extra service required in production, just object storage.
 
 ## Requirements
 
@@ -96,8 +96,8 @@ saver = ObjectStorageSaver.from_conn_string("s3://my-bucket/checkpoints")
 ```
 
 `from_conn_string` forwards extra keyword arguments to the underlying
-[fsspec](https://filesystem-spec.readthedocs.io/) filesystem constructor —
-useful for explicit credentials, non-default regions, or S3-compatible
+[fsspec](https://filesystem-spec.readthedocs.io/) filesystem constructor.
+Useful for explicit credentials, non-default regions, or S3-compatible
 endpoints (MinIO, Cloudflare R2, etc.):
 
 ```python
@@ -109,16 +109,16 @@ saver = ObjectStorageSaver.from_conn_string(
 )
 ```
 
-Credentials otherwise follow each backend's normal resolution — AWS's usual
-chain (env vars, `~/.aws/credentials`, instance/task role) for S3, and
-Application Default Credentials for GCS — nothing library-specific to
+Credentials otherwise follow each backend's normal resolution: AWS's usual
+chain (env vars, `~/.aws/credentials`, instance/task role) for S3,
+Application Default Credentials for GCS. Nothing library-specific to
 configure beyond the connection string.
 
 ## Architecture
 
 Business logic (key layout, filtering, ordering, idempotency) is written
-**once**, as async methods. The public sync API is a thin `asyncio.run(...)`
-wrapper around that same async core — not a second implementation — so
+once, as async methods. The public sync API is a thin `asyncio.run(...)`
+wrapper around that same async core, not a second implementation, so
 there's a single source of truth per operation instead of sync and async
 code drifting apart. An I/O bridge picks native async calls when the
 backend supports them (`s3fs`, `gcsfs`) and falls back to
@@ -148,10 +148,9 @@ flowchart TD
     Bridge -->|no native async| Threaded --> Backend
 ```
 
-Each checkpoint and each write becomes its **own object** — no
-read-modify-write on existing keys, so concurrent writers on different
-threads never race, and a `put` or `put_writes` call is always a single
-write:
+Each checkpoint and each write becomes its own object: no read-modify-write
+on existing keys, so concurrent writers on different threads never race,
+and a `put` or `put_writes` call is always a single write:
 
 ```mermaid
 flowchart TD
@@ -167,18 +166,18 @@ flowchart TD
 
 Key technical decisions this reflects:
 
-- `checkpoint_id` is LangGraph's own [uuid6](https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint/langgraph/checkpoint/base/id.py) —
+- `checkpoint_id` is LangGraph's own [uuid6](https://github.com/langchain-ai/langgraph/blob/main/libs/checkpoint/langgraph/checkpoint/base/id.py),
   already time-sortable, so `list()`'s newest-first ordering falls out of a
-  plain key sort. No secondary index to keep in sync.
+  plain key sort, with no secondary index to keep in sync.
 - Checkpoints and metadata are serialized through LangGraph's own
-  `JsonPlusSerializer` and treated as **opaque** — never hand-extracted
-  field by field, since real LangGraph objects carry fields their own
-  TypedDicts don't declare (see [Runtime type checking](#runtime-type-checking)).
+  `JsonPlusSerializer` and treated as opaque: never hand-extracted field by
+  field, since real LangGraph objects carry fields their own TypedDicts
+  don't declare (see [Runtime type checking](#runtime-type-checking)).
 - `put_writes`' overwrite-vs-ignore split ("first write wins" for regular
   channels, always-replace for the control channels `ERROR`/`SCHEDULED`/
   `INTERRUPT`/`RESUME`) mirrors the official sqlite/postgres savers exactly.
-- `list(filter=...)` is deliberately client-side, not a design oversight —
-  object storage has no query engine to push a filter into. See
+- `list(filter=...)` is deliberately client-side, not an oversight: object
+  storage has no query engine to push a filter into. See
   [Known limitations](#known-limitations).
 
 ## Runtime type checking
@@ -186,12 +185,12 @@ Key technical decisions this reflects:
 Public methods are decorated with [typeguard](https://typeguard.readthedocs.io/)
 and raise `typeguard.TypeCheckError` on a call with the wrong argument
 types (e.g. a non-string `thread_id`, a `writes` argument that isn't a
-sequence of `(channel, value)` pairs) — catches integration mistakes at the
-call site instead of letting them corrupt stored data silently.
+sequence of `(channel, value)` pairs). This catches integration mistakes
+at the call site instead of letting them corrupt stored data silently.
 
 `config`, `checkpoint`, and `metadata` arguments are intentionally *not*
 strictly checked against LangGraph's `RunnableConfig`/`Checkpoint`/
-`CheckpointMetadata` TypedDicts — real LangGraph objects don't match those
+`CheckpointMetadata` TypedDicts: real LangGraph objects don't match those
 TypedDicts exactly (a real `RunnableConfig`'s `metadata` field is a
 `collections.ChainMap`, not a plain `dict`; real checkpoints carry fields
 like the legacy `pending_sends` key that isn't declared at all), and strict
@@ -203,11 +202,11 @@ are checked normally.
 ## Logging
 
 Uses standard `logging` under the logger name
-`langgraph_checkpoint_objectstorage` — no handlers are configured, so it
+`langgraph_checkpoint_objectstorage`. No handlers are configured, so it
 stays silent until your application's logging config says otherwise.
 
 For quick debugging, set `LANGGRAPH_CHECKPOINT_OBJECTSTORAGE_LOG_LEVEL=DEBUG`
-before constructing an `ObjectStorageSaver` — it emits one DEBUG line per
+before constructing an `ObjectStorageSaver`. It emits one DEBUG line per
 storage read/write/list with the key or prefix touched.
 
 ## Known limitations
@@ -217,13 +216,13 @@ storage read/write/list with the key or prefix touched.
   engine to push the filter into. Fine for typical thread histories (dozens
   to low hundreds of checkpoints); a very long-running thread's `list` calls
   will get proportionally slower.
-- No garbage collection or retention policy — old checkpoints accumulate
+- No garbage collection or retention policy. Old checkpoints accumulate
   until you call `delete_thread`, or you set up bucket lifecycle rules
   yourself.
-- Two writers on the *same* `thread_id` writing concurrently can race —
-  same guarantee level as the official sqlite saver (last write "wins" by
-  whichever checkpoint_id sorts last, not by wall-clock order under clock
-  skew). Concurrent writers on different threads never race.
+- Two writers on the *same* `thread_id` writing concurrently can race, at
+  the same guarantee level as the official sqlite saver (last write "wins"
+  by whichever checkpoint_id sorts last, not by wall-clock order under
+  clock skew). Concurrent writers on different threads never race.
 - The sync `list()` eagerly collects all matching checkpoints before
   yielding the first one (it wraps the async implementation via
   `asyncio.run`, which can't stream lazily). Use `alist()` from async code
@@ -240,7 +239,7 @@ make test-unit        # tests/unit only -- no external services, fast
 make test-integration  # tests/integration -- starts docker-compose emulators first
 ```
 
-`test`/`test-unit`/`test-integration`/`build` all run `lint` first — a
+`test`/`test-unit`/`test-integration`/`build` all run `lint` first, so a
 formatting or static-analysis failure blocks the run rather than
 surfacing only after tests pass. `bandit`/`vulture` are scoped to `src/`
 only: `bandit` flags every pytest `assert` and the tests' intentionally
@@ -255,12 +254,12 @@ uv sync --all-extras --group dev
 uv run pytest
 ```
 
-**Test layout**: `tests/unit/` exercises internal modules (key layout,
+Test layout: `tests/unit/` exercises internal modules (key layout,
 serialization, the saver's core logic, logging, type checking) with no
 external service. `tests/integration/` validates the full
 `BaseCheckpointSaver` contract via
 [`langgraph-checkpoint-conformance`](https://pypi.org/project/langgraph-checkpoint-conformance/)
-against real backends — local disk, an in-process moto server for S3, and
+against real backends: local disk, an in-process moto server for S3, and
 (via `docker-compose.yaml`) `fake-gcs-server`/`moto-server` containers for a
 full local GCS/S3 round-trip with no cloud account needed. A gated test
 against a real GCS bucket runs only when `GCS_TEST_BUCKET` is set.
@@ -274,8 +273,10 @@ make compose-down     # stop them when done
 ## Contributing
 
 Issues and PRs welcome. Before opening one, `make test` should pass
-(`make test-integration` too, if your change touches backend I/O).
+(`make test-integration` too, if your change touches backend I/O). CI runs
+lint, unit tests (Python 3.11/3.12/3.13), and integration tests against
+docker-compose emulators on every push and PR.
 
 ## License
 
-MIT.
+[MIT](LICENSE).
