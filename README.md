@@ -310,6 +310,12 @@ Issues and PRs welcome. Before opening one, `make test` should pass
 lint, unit tests (Python 3.11/3.12/3.13), and integration tests against
 docker-compose emulators on every push and PR.
 
+Add an entry under `## [Unreleased]` in [`CHANGELOG.md`](CHANGELOG.md) for
+any user-facing change. On merge to `main`, CI moves that section into a
+new dated version automatically (see the `release` job in
+`.github/workflows/ci.yml`). An empty `[Unreleased]` just gets a generic
+placeholder line instead, so it's worth taking the extra minute.
+
 ## License
 
 [MIT](LICENSE).

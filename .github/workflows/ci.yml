@@ -64,24 +64,47 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-      - name: Bump patch version in pyproject.toml
+      - name: Bump version and update CHANGELOG.md
         run: |
           python3 - <<'EOF'
+          import os
           import re
+          from datetime import datetime, timezone
 
-          path = "pyproject.toml"
-          text = open(path).read()
+          # -- bump pyproject.toml --
+          pyproject_path = "pyproject.toml"
+          text = open(pyproject_path).read()
           match = re.search(r'^version = "(\d+)\.(\d+)\.(\d+)"$', text, re.MULTILINE)
           major, minor, patch = match.groups()
           new_version = f"{major}.{minor}.{int(patch) + 1}"
           text = text[: match.start()] + f'version = "{new_version}"' + text[match.end() :]
-          open(path, "w").write(text)
+          open(pyproject_path, "w").write(text)
+
+          # -- move [Unreleased]'s content into a new dated version section --
+          # Contributors add entries under "## [Unreleased]" as they work
+          # (Keep a Changelog convention); release just retitles that
+          # section with the version and date, and leaves a fresh empty
+          # Unreleased section above it.
+          changelog_path = "CHANGELOG.md"
+          changelog = open(changelog_path).read()
+          today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+          marker = "## [Unreleased]"
+          start = changelog.index(marker)
+          body_start = start + len(marker)
+          next_heading = changelog.find("\n## [", body_start)
+          body = changelog[body_start:next_heading].strip("\n")
+          if not body:
+              body = "### Changed\n\n- No changelog entries were added for this release."
+          new_section = f"{marker}\n\n## [{new_version}] - {today}\n\n{body}\n\n"
+          changelog = changelog[:start] + new_section + changelog[next_heading + 1 :]
+          open(changelog_path, "w").write(changelog)
+
+          with open(os.environ["GITHUB_ENV"], "a") as f:
+              f.write(f"NEW_VERSION={new_version}\n")
           EOF
       - name: Commit and tag
         run: |
-          NEW_VERSION=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
-          echo "NEW_VERSION=${NEW_VERSION}" >> "$GITHUB_ENV"
-          git add pyproject.toml
+          git add pyproject.toml CHANGELOG.md
           git commit -m "chore(release): v${NEW_VERSION} [skip ci]"
           git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
       - name: Push version bump and tag
