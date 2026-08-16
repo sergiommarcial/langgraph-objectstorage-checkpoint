@@ -57,6 +57,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.RELEASE_PAT }}
       - uses: astral-sh/setup-uv@v3
         with:
           enable-cache: true
