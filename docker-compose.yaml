@@ -1,0 +1,27 @@
+services:
+
+  fake-gcs-server:
+    image: fsouza/fake-gcs-server:latest
+    container_name: fake-gcs-server
+    ports:
+      - "4443:4443"
+    command: ["--scheme", "http", "-host", "0.0.0.0", "-port", "4443"]
+    volumes:
+      - gcs-data:/data
+
+  moto-server:
+    image: motoserver/moto:latest
+    container_name: moto-server
+    # Host side is 5001, not moto's default 5000 -- macOS's AirPlay
+    # Receiver (ControlCenter) squats on 5000 by default and Docker
+    # Desktop's networking doesn't reliably fail loudly on the collision,
+    # so requests silently reach ControlCenter (403) instead of moto.
+    ports:
+      - "5001:5000"
+    command: ["-H", "0.0.0.0", "-p", "5000"]
+    volumes:
+      - moto-data:/data
+
+volumes:
+  gcs-data:
+  moto-data:
