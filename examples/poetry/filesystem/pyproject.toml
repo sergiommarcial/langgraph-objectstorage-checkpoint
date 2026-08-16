@@ -1,0 +1,16 @@
+[tool.poetry]
+name = "objectstorage-checkpoint-example-poetry"
+version = "0.0.0"
+description = "Poetry example for langgraph-checkpoint-objectstorage"
+authors = ["Sergio"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+
+langgraph-checkpoint-objectstorage = { path = "../../../", develop = true }
+langgraph = "^1.2.11"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

@@ -1,0 +1,19 @@
+[tool.poetry]
+name = "objectstorage-checkpoint-example-poetry-gcs"
+version = "0.0.0"
+description = "Poetry + GCS example for langgraph-checkpoint-objectstorage"
+authors = ["Sergio"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+langgraph = "*"
+# Local path install -- swap for a normal PyPI dependency once the package
+# is published. `extras = ["gcs"]` pulls in gcsfs.
+langgraph-checkpoint-objectstorage = { path = "../../../", develop = true, extras = [
+    "gcs",
+] }
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

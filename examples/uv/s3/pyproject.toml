@@ -1,0 +1,13 @@
+[project]
+name = "objectstorage-checkpoint-example-uv-s3"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph",
+    "langgraph-checkpoint-objectstorage[s3]",
+]
+
+# Local path install -- swap for a normal PyPI dependency once the package
+# is published.
+[tool.uv.sources]
+langgraph-checkpoint-objectstorage = { path = "../../../", editable = true }

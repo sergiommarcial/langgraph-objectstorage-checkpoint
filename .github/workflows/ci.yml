@@ -52,9 +52,14 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
       - name: Configure git identity
         run: |
           git config user.name "github-actions[bot]"
@@ -81,3 +86,10 @@ jobs:
           git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
       - name: Push version bump and tag
         run: git push origin main "v${NEW_VERSION}"
+      - name: Build dist
+        run: uv build
+      - name: Publish GitHub release with dist artifacts
+        run: |
+          gh release create "v${NEW_VERSION}" dist/* \
+            --title "v${NEW_VERSION}" \
+            --generate-notes

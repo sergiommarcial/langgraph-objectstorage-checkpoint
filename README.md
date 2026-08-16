@@ -13,6 +13,7 @@ bucket (or a directory).
 - [Requirements](#requirements)
 - [Install](#install)
 - [Quickstart](#quickstart)
+- [Examples](#examples)
 - [Choosing a backend](#choosing-a-backend)
 - [Architecture](#architecture)
 - [Runtime type checking](#runtime-type-checking)
@@ -77,6 +78,28 @@ print(result)  # {"count": 1}
 # inspect or resume from the same thread_id at any later point:
 history = list(graph.get_state_history(config))
 ```
+
+## Examples
+
+This same quickstart, runnable under three build tools:
+
+- [`examples/pip`](examples/pip): venv + `pip install -r requirements.txt`
+- [`examples/uv/filesystem`](examples/uv/filesystem): `uv run main.py`
+- [`examples/poetry/filesystem`](examples/poetry/filesystem): `poetry install && poetry run python main.py`
+
+Each installs the package from this repo via a local path dependency
+(swap for a normal PyPI dependency once the package is published).
+
+Further along, against object storage instead of local disk (real bucket
+or a local emulator, no cloud account needed): multiple independent
+sessions run sequentially and one is resumed later, plus the same pattern
+run concurrently via the async API, for both S3 and GCS:
+
+- [`examples/uv/s3`](examples/uv/s3) / [`examples/uv/s3-async`](examples/uv/s3-async)
+- [`examples/poetry/gcs`](examples/poetry/gcs) / [`examples/poetry/gcs-async`](examples/poetry/gcs-async)
+
+Sequential and concurrent are separate examples rather than one combined
+script, see [Known limitations](#known-limitations) for why.
 
 ## Choosing a backend
 
@@ -227,6 +250,16 @@ storage read/write/list with the key or prefix touched.
   yielding the first one (it wraps the async implementation via
   `asyncio.run`, which can't stream lazily). Use `alist()` from async code
   if you need true streaming.
+- Don't mix sync and async calls on the *same* `ObjectStorageSaver`
+  instance against S3 or GCS. Sync calls run on a persistent background
+  loop the underlying filesystem maintains; async calls run on whichever
+  loop the caller provides. The aiohttp session those backends use can
+  only belong to one loop at a time, so alternating between the two on
+  one instance breaks with `RuntimeError: ... attached to a different
+  loop`. Build a separate saver instance per usage style instead (see
+  `examples/uv/s3` vs `examples/uv/s3-async`, or `examples/poetry/gcs` vs
+  `examples/poetry/gcs-async`). Local filesystem isn't affected: it has no
+  persistent session to misalign.
 
 ## Development
 

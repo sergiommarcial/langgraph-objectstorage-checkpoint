@@ -1,0 +1,11 @@
+[project]
+name = "objectstorage-checkpoint-example-uv"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph",
+    "langgraph-checkpoint-objectstorage",
+]
+
+[tool.uv.sources]
+langgraph-checkpoint-objectstorage = { path = "../../../", editable = true }

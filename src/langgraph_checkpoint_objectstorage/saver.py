@@ -8,7 +8,7 @@ from typing import Any
 
 import fsspec
 from fsspec import AbstractFileSystem
-from fsspec.asyn import AsyncFileSystem
+from fsspec.asyn import AsyncFileSystem, sync as fsspec_sync
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     BaseCheckpointSaver,
@@ -98,10 +98,32 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         Returns:
             A new `ObjectStorageSaver` backed by the resolved filesystem.
         """
+        # fsspec caches filesystem instances globally, keyed by constructor
+        # kwargs -- two savers built from the same URI/credentials would
+        # otherwise share one underlying aiohttp session. That session
+        # binds to whichever event loop first touches it; a second saver
+        # (or this same saver reused from a different loop context) can
+        # then hit "Event loop is closed". skip_instance_cache=True gives
+        # every saver its own filesystem instance so they can never
+        # cross-contaminate.
+        storage_options.setdefault("skip_instance_cache", True)
         fs, path = fsspec.core.url_to_fs(conn_string, **storage_options)
         return cls(fs, path)
 
-    # ---- I/O bridge: native async when available, thread-pooled sync otherwise ----
+    def _run_sync(self, func, *args, **kwargs):
+        # asyncio.run() opens and tears down a fresh event loop per call,
+        # but s3fs/gcsfs bind their aiohttp session to whatever loop is
+        # running the first time they're used -- a second asyncio.run()
+        # call (a new loop) then breaks with "Event loop is closed"
+        # against that same session. AsyncFileSystem instances already
+        # maintain a persistent background-thread loop (`fs.loop`, what
+        # fsspec's own sync wrappers run on); routing through that instead
+        # keeps every sync call on the one loop the session was bound to.
+        # Non-async-native filesystems (local) have no such persistent
+        # session to misalign, so asyncio.run() is fine there.
+        if self._is_async_native:
+            return fsspec_sync(self.fs.loop, func, *args, **kwargs)
+        return asyncio.run(func(*args, **kwargs))
 
     async def _cat(self, key: str) -> bytes:
         try:
@@ -155,8 +177,6 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             logger.debug("rm prefix=%s -> not found", prefix)
             raise
         logger.debug("rm prefix=%s -> removed", prefix)
-
-    # ---- async core: business logic, backend-agnostic ----
 
     async def _read_pending_writes(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
@@ -241,12 +261,6 @@ class ObjectStorageSaver(BaseCheckpointSaver):
     ) -> None:
         thread_id, checkpoint_ns = _thread_ns(config)
         checkpoint_id = config["configurable"]["checkpoint_id"]
-        # WRITES_IDX_MAP's special channels (ERROR/SCHEDULED/INTERRUPT/RESUME) must
-        # always reflect the latest write, so a batch made up only of those channels
-        # is fully overwritable. A batch containing any regular channel switches to
-        # "first write wins" for the whole batch, so a retried task can't silently
-        # clobber a write another task already committed. Mirrors the official
-        # sqlite/postgres savers' INSERT OR REPLACE vs INSERT OR IGNORE split.
         overwrite = all(channel in WRITES_IDX_MAP for channel, _ in writes)
         for idx, (channel, value) in enumerate(writes):
             actual_idx = WRITES_IDX_MAP.get(channel, idx)
@@ -316,14 +330,6 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         except FileNotFoundError:
             pass
 
-    # ---- public async API (BaseCheckpointSaver contract) ----
-
-    # get_tuple/list return CheckpointTuple, a NamedTuple whose own fields are
-    # the same Checkpoint/CheckpointMetadata TypedDicts -- see the note on
-    # aput's checkpoint/metadata params below. Checking the return value would
-    # hit the identical "unexpected extra key" problem, so these stay
-    # undecorated; their non-Checkpoint-shaped params still benefit from
-    # static typing even without runtime enforcement.
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Async variant of `get_tuple`. See `get_tuple` for details."""
         return await self._get_tuple(config)
@@ -343,16 +349,6 @@ class ObjectStorageSaver(BaseCheckpointSaver):
     @typechecked
     async def aput(
         self,
-        # Real langgraph RunnableConfigs carry a `metadata` field that's a
-        # collections.ChainMap at runtime, not a plain dict -- typeguard's
-        # strict TypedDict checking rejects that against RunnableConfig's
-        # `metadata: dict[str, Any]` declaration. Same story for
-        # checkpoint/metadata below: real Checkpoint/CheckpointMetadata
-        # dicts carry fields beyond their TypedDict declarations (e.g.
-        # legacy `pending_sends`), which strict checking rejects as
-        # "unexpected extra keys". All three are typed loosely here on
-        # purpose so real langgraph objects pass through unvalidated,
-        # matching the opaque-object handling in envelope.py.
         config: Mapping[str, Any],
         checkpoint: Mapping[str, Any],
         metadata: Mapping[str, Any],
@@ -377,8 +373,6 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         """Async variant of `delete_thread`. See `delete_thread` for details."""
         await self._delete_thread(thread_id)
 
-    # ---- public sync API (BaseCheckpointSaver contract) ----
-
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Fetch a checkpoint tuple for the given configuration.
 
@@ -396,7 +390,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             exists for that thread/namespace/id -- never raises for
             "not found".
         """
-        return asyncio.run(self._get_tuple(config))
+        return self._run_sync(self._get_tuple, config)
 
     def list(
         self,
@@ -434,7 +428,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 )
             ]
 
-        yield from asyncio.run(_collect())
+        yield from self._run_sync(_collect)
 
     @typechecked
     def put(
@@ -461,7 +455,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             The config to use to fetch this exact checkpoint later
             (`configurable.thread_id`/`checkpoint_ns`/`checkpoint_id`).
         """
-        return asyncio.run(self._put(config, checkpoint, metadata, new_versions))
+        return self._run_sync(self._put, config, checkpoint, metadata, new_versions)
 
     @typechecked
     def put_writes(
@@ -488,7 +482,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             task_path: Unused by this saver -- accepted for
                 `BaseCheckpointSaver` contract compatibility.
         """
-        asyncio.run(self._put_writes(config, writes, task_id, task_path))
+        self._run_sync(self._put_writes, config, writes, task_id, task_path)
 
     @typechecked
     def delete_thread(self, thread_id: str) -> None:
@@ -499,4 +493,4 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         Args:
             thread_id: The thread to delete.
         """
-        asyncio.run(self._delete_thread(thread_id))
+        self._run_sync(self._delete_thread, thread_id)
