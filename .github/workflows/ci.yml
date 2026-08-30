@@ -12,6 +12,7 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v3
@@ -21,6 +22,7 @@ jobs:
 
   test-unit:
     runs-on: ubuntu-latest
+    if: "!startsWith(github.event.head_commit.message, 'chore(release):')"
     strategy:
       fail-fast: false
       matrix:
@@ -107,7 +109,7 @@ jobs:
       - name: Commit and tag
         run: |
           git add pyproject.toml CHANGELOG.md
-          git commit -m "chore(release): v${NEW_VERSION} [skip ci]"
+          git commit -m "chore(release): v${NEW_VERSION}"
           git tag -a "v${NEW_VERSION}" -m "v${NEW_VERSION}"
       - name: Push version bump and tag
         run: git push origin main "v${NEW_VERSION}"
