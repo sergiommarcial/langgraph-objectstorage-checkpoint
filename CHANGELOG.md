@@ -9,6 +9,12 @@ which also updates this file).
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-30
+
+### Changed
+
+- No changelog entries were added for this release.
+
 ## [0.1.6] - 2026-08-30
 
 ### Changed
