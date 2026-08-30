@@ -16,6 +16,7 @@ bucket (or a directory).
 - [Examples](#examples)
 - [Choosing a backend](#choosing-a-backend)
 - [Architecture](#architecture)
+- [Architecture decision records](#architecture-decision-records)
 - [Runtime type checking](#runtime-type-checking)
 - [Logging](#logging)
 - [Known limitations](#known-limitations)
@@ -203,6 +204,17 @@ Key technical decisions this reflects:
   storage has no query engine to push a filter into. See
   [Known limitations](#known-limitations).
 
+## Architecture decision records
+
+Design proposals and decisions that change or extend the architecture
+above live under [`docs/adr/`](docs/adr/), not in this README:
+
+- [`0001-slatedb.md`](docs/adr/0001-slatedb.md) --
+  proposal for an opt-in SlateDB-backed storage mode to bound
+  `get_tuple(latest)`/`list()` cost on threads with very large checkpoint
+  histories (see [Known limitations](#known-limitations)). Status:
+  proposed, not implemented.
+
 ## Runtime type checking
 
 Public methods are decorated with [typeguard](https://typeguard.readthedocs.io/)
@@ -239,6 +251,13 @@ storage read/write/list with the key or prefix touched.
   engine to push the filter into. Fine for typical thread histories (dozens
   to low hundreds of checkpoints); a very long-running thread's `list` calls
   will get proportionally slower.
+- `get_tuple` without an explicit `checkpoint_id` (resolving "latest") pays
+  the same cost: it lists every checkpoint key under the thread/namespace to
+  find the newest one. Since this runs on every resume of an existing
+  thread, a thread with a very large checkpoint history will see resume
+  latency grow with checkpoint count, not just `list()` calls. See
+  [`docs/adr/0001-slatedb.md`](docs/adr/0001-slatedb.md)
+  for a proposed fix (currently a design proposal, not yet implemented).
 - No garbage collection or retention policy. Old checkpoints accumulate
   until you call `delete_thread`, or you set up bucket lifecycle rules
   yourself.
