@@ -335,6 +335,27 @@ new dated version automatically (see the `release` job in
 `.github/workflows/ci.yml`). An empty `[Unreleased]` just gets a generic
 placeholder line instead, so it's worth taking the extra minute.
 
+### Releasing
+
+The `release` job only bumps `pyproject.toml` and `CHANGELOG.md` and
+pushes that commit to `main` -- it doesn't tag or publish anything.
+Publishing to PyPI is a manual step, since it's the one part of this
+pipeline that isn't reversible:
+
+```bash
+git pull origin main
+git tag -a vX.Y.Z -m vX.Y.Z
+git push origin vX.Y.Z
+```
+
+Pushing that tag triggers `.github/workflows/publish.yml`, which builds
+the package and publishes it to PyPI via trusted publishing (no token
+needed). Create the GitHub release from the same tag, e.g.:
+
+```bash
+gh release create vX.Y.Z --title vX.Y.Z --generate-notes
+```
+
 ## License
 
 [MIT](LICENSE).
