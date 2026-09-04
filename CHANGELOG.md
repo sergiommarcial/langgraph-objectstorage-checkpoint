@@ -9,6 +9,17 @@ which also updates this file).
 
 ## [Unreleased]
 
+### Added
+
+- `ttl` constructor param and `delete_expired`/`adelete_expired` methods on
+  `ObjectStorageSaver` for age-based checkpoint/write expiry. Local
+  filesystem relies on calling `delete_expired()` yourself (cron, k8s
+  CronJob, ...); S3/GCS can instead use a bucket lifecycle rule against the
+  saver's `root` prefix, with no saver code involved. See the README's
+  Checkpoint TTL section for setup and the shared-bucket lifecycle-rule
+  caveat. Setting `ttl` also logs a one-time `WARNING` on construction,
+  since the saver has no way to verify a lifecycle rule actually exists.
+
 ## [0.1.7] - 2026-08-30
 
 ### Changed

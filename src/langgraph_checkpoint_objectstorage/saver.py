@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import fsspec
@@ -45,6 +46,15 @@ def _cfg(
     }
 
 
+def _mtime_of(info: Mapping[str, Any]) -> datetime:
+    raw = info.get("mtime", info.get("LastModified"))
+    if raw is None:
+        raise ValueError(f"filesystem info has no mtime/LastModified: {info!r}")
+    if isinstance(raw, (int, float)):
+        return datetime.fromtimestamp(raw, tz=timezone.utc)
+    return raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+
+
 class ObjectStorageSaver(BaseCheckpointSaver):
     """LangGraph checkpoint saver backed by local filesystem, GCS, or S3.
 
@@ -61,7 +71,9 @@ class ObjectStorageSaver(BaseCheckpointSaver):
     """
 
     @typechecked
-    def __init__(self, fs: AbstractFileSystem, root: str) -> None:
+    def __init__(
+        self, fs: AbstractFileSystem, root: str, ttl: timedelta | None = None
+    ) -> None:
         """Wrap an existing fsspec filesystem as a checkpoint store.
 
         Args:
@@ -72,25 +84,47 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             root: Root prefix under which every checkpoint and write is
                 stored -- a directory path for local filesystems, or a
                 "bucket/prefix" path for object storage.
+            ttl: Maximum age before a checkpoint or write becomes eligible
+                for deletion by `delete_expired`/`adelete_expired`. `None`
+                (default) disables TTL. For S3/GCS, this value isn't
+                enforced by the saver itself -- configure a bucket
+                lifecycle rule filtered by `root` to match (see the
+                README's Checkpoint TTL section); `delete_expired` works
+                there too as an optional immediate-delete alternative.
         """
         super().__init__()
         self.fs = fs
         self.root = root.rstrip("/")
+        self.ttl = ttl
         self._is_async_native = isinstance(fs, AsyncFileSystem)
         level_name = os.environ.get(_LOG_LEVEL_ENV)
         if level_name:
             logger.setLevel(level_name.upper())
+        if ttl is not None:
+            logger.warning(
+                "ttl=%r is set, but ObjectStorageSaver never deletes anything "
+                "on its own: configure a bucket lifecycle rule filtered by "
+                "root=%r (S3/GCS), or call delete_expired()/adelete_expired() "
+                "yourself on a schedule (required for local disk).",
+                ttl,
+                self.root,
+            )
 
     @classmethod
     @typechecked
     def from_conn_string(
-        cls, conn_string: str, **storage_options: Any
+        cls,
+        conn_string: str,
+        *,
+        ttl: timedelta | None = None,
+        **storage_options: Any,
     ) -> "ObjectStorageSaver":
         """Build a saver from an fsspec connection string.
 
         Args:
             conn_string: An fsspec URI, e.g. `"file:///path"`,
                 `"s3://bucket/prefix"`, or `"gcs://bucket/prefix"`.
+            ttl: Forwarded to `__init__` -- see its docstring.
             **storage_options: Forwarded to the underlying fsspec
                 filesystem constructor -- useful for explicit credentials
                 or a custom S3-compatible endpoint (MinIO, etc.).
@@ -100,7 +134,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         """
         storage_options.setdefault("skip_instance_cache", True)
         fs, path = fsspec.core.url_to_fs(conn_string, **storage_options)
-        return cls(fs, path)
+        return cls(fs, path, ttl=ttl)
 
     def _run_sync(self, func, *args, **kwargs):
         if self._is_async_native:
@@ -139,6 +173,18 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             logger.debug("find prefix=%s -> not found", prefix)
             raise
         logger.debug("find prefix=%s -> %d keys", prefix, len(found))
+        return found
+
+    async def _find_detailed(self, prefix: str) -> dict[str, dict[str, Any]]:
+        try:
+            if self._is_async_native:
+                found = await self.fs._find(prefix, detail=True)
+            else:
+                found = await asyncio.to_thread(self.fs.find, prefix, detail=True)
+        except FileNotFoundError:
+            logger.debug("find_detailed prefix=%s -> not found", prefix)
+            raise
+        logger.debug("find_detailed prefix=%s -> %d keys", prefix, len(found))
         return found
 
     async def _exists(self, key: str) -> bool:
@@ -312,6 +358,18 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         except FileNotFoundError:
             pass
 
+    async def _delete_expired(self) -> None:
+        if self.ttl is None:
+            return
+        cutoff = datetime.now(timezone.utc) - self.ttl
+        try:
+            detail = await self._find_detailed(self.root)
+        except FileNotFoundError:
+            return
+        for key, info in detail.items():
+            if _mtime_of(info) < cutoff:
+                await self._rm(key)
+
     async def aget_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Async variant of `get_tuple`. See `get_tuple` for details."""
         return await self._get_tuple(config)
@@ -354,6 +412,10 @@ class ObjectStorageSaver(BaseCheckpointSaver):
     async def adelete_thread(self, thread_id: str) -> None:
         """Async variant of `delete_thread`. See `delete_thread` for details."""
         await self._delete_thread(thread_id)
+
+    async def adelete_expired(self) -> None:
+        """Async variant of `delete_expired`. See `delete_expired` for details."""
+        await self._delete_expired()
 
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         """Fetch a checkpoint tuple for the given configuration.
@@ -476,3 +538,14 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             thread_id: The thread to delete.
         """
         self._run_sync(self._delete_thread, thread_id)
+
+    def delete_expired(self) -> None:
+        """Delete every checkpoint and write older than `ttl`.
+
+        A no-op if `ttl` is `None` (the default). Deletion is per-object
+        age, not per-checkpoint-chain: a checkpoint and the writes added
+        to it later via `put_writes` age out independently, so they can
+        expire at slightly different times. See the README's Checkpoint
+        TTL section.
+        """
+        self._run_sync(self._delete_expired)
