@@ -9,6 +9,8 @@ which also updates this file).
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-04
+
 ### Added
 
 - `ttl` constructor param and `delete_expired`/`adelete_expired` methods on
