@@ -23,3 +23,5 @@ ObjectStorageSaver.put_writes
 ObjectStorageSaver.aput_writes
 ObjectStorageSaver.delete_thread
 ObjectStorageSaver.adelete_thread
+ObjectStorageSaver.delete_expired
+ObjectStorageSaver.adelete_expired

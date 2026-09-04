@@ -1,20 +1,29 @@
 # langgraph-checkpoint-objectstorage
 
 [![CI](https://github.com/sergiommarcial/langgraph-objectstorage-checkpoint/actions/workflows/ci.yml/badge.svg)](https://github.com/sergiommarcial/langgraph-objectstorage-checkpoint/actions/workflows/ci.yml)
+[![OS](https://img.shields.io/badge/OS-Linux-blue)](.github/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/langgraph-checkpoint-objectstorage)](https://pypi.org/project/langgraph-checkpoint-objectstorage/)
+[![Python versions](https://img.shields.io/pypi/pyversions/langgraph-checkpoint-objectstorage)](https://pypi.org/project/langgraph-checkpoint-objectstorage/)
+[![License](https://img.shields.io/github/license/sergiommarcial/langgraph-objectstorage-checkpoint)](LICENSE)
+[![Downloads](https://img.shields.io/pypi/dm/langgraph-checkpoint-objectstorage)](https://pypi.org/project/langgraph-checkpoint-objectstorage/)
 
 A [LangGraph](https://github.com/langchain-ai/langgraph) `BaseCheckpointSaver`
 that persists checkpoints to local filesystem, Google Cloud Storage, or AWS
 S3. One class, backend picked by connection string, nothing to run beyond a
 bucket (or a directory).
 
+**Most checkpoint savers make you run a database. This one just needs a
+bucket you probably already have.**
+
 ## Table of contents
 
 - [Features](#features)
 - [Requirements](#requirements)
 - [Install](#install)
-- [Quickstart](#quickstart)
+- [Quickstart](#-quickstart)
 - [Examples](#examples)
 - [Choosing a backend](#choosing-a-backend)
+- [Checkpoint TTL](#-checkpoint-ttl)
 - [Architecture](#architecture)
 - [Architecture decision records](#architecture-decision-records)
 - [Runtime type checking](#runtime-type-checking)
@@ -40,6 +49,30 @@ bucket (or a directory).
 - Ships `py.typed` for full static type coverage under mypy/pyright.
 - No database or extra service required in production, just object storage.
 
+> [!NOTE]
+> **Best for:** apps already living in S3/GCS/local disk that don't want a
+> database in the loop just for checkpointing, or that need checkpoints to
+> land in the same bucket as everything else they store.
+>
+> **Not for:** workloads needing transactional guarantees across
+> checkpoints, or heavy concurrent writes to the *same* thread from
+> multiple writers — see [Known limitations](#known-limitations). For
+> those, the official `langgraph-checkpoint-postgres` saver is the better
+> fit.
+
+### vs. the official savers
+
+|                          | This saver                      | `-sqlite` / `-postgres` |
+|--------------------------|----------------------------------|--------------------------|
+| Infra to run             | None — a bucket or a directory  | A database server        |
+| Backend                  | Local disk, S3, or GCS           | SQLite or Postgres        |
+| `put`/`put_writes` model | Each call writes a new object    | Row inserts               |
+| `list(filter=...)`       | Client-side (see [Known limitations](#known-limitations)) | Pushed to SQL |
+| Retention                | TTL via bucket lifecycle rules, or `delete_expired()` | Up to you |
+
+If you'd rather not run a database just to remember where a graph left off,
+this is that option.
+
 ## Requirements
 
 Python 3.11+.
@@ -52,7 +85,7 @@ pip install "langgraph-checkpoint-objectstorage[s3]"   # + AWS S3
 pip install "langgraph-checkpoint-objectstorage[gcs]"  # + Google Cloud Storage
 ```
 
-## Quickstart
+## ⚡ Quickstart
 
 ```python
 from langgraph.graph import END, START, StateGraph
@@ -75,8 +108,8 @@ config = {"configurable": {"thread_id": "1"}}
 result = graph.invoke({"count": 0}, config)
 print(result)  # {"count": 1}
 
-# Checkpoints persisted under the thread survive process restarts --
-# inspect or resume from the same thread_id at any later point:
+# Checkpoints persisted under the thread survive process restarts.
+# Inspect or resume from the same thread_id at any later point:
 history = list(graph.get_state_history(config))
 ```
 
@@ -91,10 +124,10 @@ This same quickstart, runnable under three build tools:
 Each installs the package from this repo via a local path dependency
 (swap for a normal PyPI dependency once the package is published).
 
-Further along, against object storage instead of local disk (real bucket
-or a local emulator, no cloud account needed): multiple independent
-sessions run sequentially and one is resumed later, plus the same pattern
-run concurrently via the async API, for both S3 and GCS:
+For object storage instead of local disk (a real bucket or a local
+emulator, no cloud account needed), there are examples for both S3 and
+GCS: multiple independent sessions running sequentially with one resumed
+later, and the same pattern again run concurrently via the async API.
 
 - [`examples/uv/s3`](examples/uv/s3) / [`examples/uv/s3-async`](examples/uv/s3-async)
 - [`examples/poetry/gcs`](examples/poetry/gcs) / [`examples/poetry/gcs-async`](examples/poetry/gcs-async)
@@ -109,7 +142,7 @@ Swap the connection string; everything else stays the same.
 ```python
 from langgraph_checkpoint_objectstorage import ObjectStorageSaver
 
-# Local filesystem -- handy for development, or single-node deployments
+# Local filesystem: handy for development, or single-node deployments
 saver = ObjectStorageSaver.from_conn_string("file:///var/lib/my-app/checkpoints")
 
 # Google Cloud Storage
@@ -135,8 +168,83 @@ saver = ObjectStorageSaver.from_conn_string(
 
 Credentials otherwise follow each backend's normal resolution: AWS's usual
 chain (env vars, `~/.aws/credentials`, instance/task role) for S3,
-Application Default Credentials for GCS. Nothing library-specific to
-configure beyond the connection string.
+Application Default Credentials for GCS. There's nothing library-specific
+to configure beyond the connection string.
+
+## ⏳ Checkpoint TTL
+
+Pass `ttl` to bound how long checkpoints and writes stick around:
+
+```python
+from datetime import timedelta
+
+saver = ObjectStorageSaver.from_conn_string(
+    "s3://my-bucket/checkpoints",
+    ttl=timedelta(days=30),
+)
+```
+
+`ttl=None` (the default) turns TTL off completely: nothing expires on its
+own, exactly like before this option existed. Setting `ttl` logs a
+one-time `WARNING` on construction as a reminder that the saver itself
+never deletes anything — there's no way for it to check whether a bucket
+lifecycle rule actually exists, so it just tells you what to go set up.
+
+**Local filesystem** has no built-in expiry, so you call `delete_expired()`
+(or `adelete_expired()`) yourself on a schedule (cron, k8s CronJob, ...):
+
+```python
+saver.delete_expired()  # deletes everything older than `ttl`
+```
+
+**S3 and GCS** don't need `delete_expired()` at all if you configure a
+bucket lifecycle rule against the saver's `root` prefix. The cloud provider
+then expires objects on its own schedule (typically once a day), with no
+saver code involved. `ttl` still documents the intended age; keeping the
+bucket rule's age in sync with it is on you.
+
+S3 lifecycle rule (filtered by `root`, e.g. `"checkpoints/"`):
+
+```json
+{
+  "Rules": [
+    {
+      "ID": "expire-checkpoints",
+      "Filter": {"Prefix": "checkpoints/"},
+      "Status": "Enabled",
+      "Expiration": {"Days": 30}
+    }
+  ]
+}
+```
+
+GCS lifecycle rule (same idea, via `gsutil` or the console):
+
+```json
+{
+  "rule": [
+    {
+      "action": {"type": "Delete"},
+      "condition": {"age": 30, "matchesPrefix": ["checkpoints/"]}
+    }
+  ]
+}
+```
+
+`delete_expired()`/`adelete_expired()` also work against S3/GCS-backed
+savers. They're useful before a lifecycle rule is set up, or when you want
+deletion faster than the cloud provider's own cadence.
+
+> [!WARNING]
+> **Sharing a bucket with other data?** Always end the lifecycle rule's
+> prefix with `/`, exactly as in the examples above. S3's `Filter.Prefix`
+> and GCS's `matchesPrefix` do a literal string match with no concept of
+> where a path actually ends, so `"Prefix": "checkpoints"` without the
+> trailing slash also matches `checkpoints-backup/...` or
+> `checkpoints-v2/...`, quietly expiring unrelated data that happens to sit
+> next to this saver's `root`. That risk is specific to the lifecycle rule
+> you configure by hand, though: `delete_expired()` itself treats `root` as
+> a real directory path, not a raw prefix, so it doesn't have this problem.
 
 ## Architecture
 
@@ -209,7 +317,9 @@ Key technical decisions this reflects:
 Design proposals and decisions that change or extend the architecture
 above live under [`docs/adr/`](docs/adr/), not in this README:
 
-- [`0001-slatedb.md`](docs/adr/0001-slatedb.md) --
+- [`0001-checkpoint-ttl.md`](docs/adr/0001-checkpoint-ttl.md) on why TTL enforcement is
+backend-specific instead of one mechanism for all three.
+- [`0002-slatedb.md`](docs/adr/0002-slatedb.md) --
   proposal for an opt-in SlateDB-backed storage mode to bound
   `get_tuple(latest)`/`list()` cost on threads with very large checkpoint
   histories (see [Known limitations](#known-limitations)). Status:
@@ -229,10 +339,10 @@ strictly checked against LangGraph's `RunnableConfig`/`Checkpoint`/
 TypedDicts exactly (a real `RunnableConfig`'s `metadata` field is a
 `collections.ChainMap`, not a plain `dict`; real checkpoints carry fields
 like the legacy `pending_sends` key that isn't declared at all), and strict
-checking would reject every real invocation. Same reasoning applies to
-`get_tuple`/`list`'s return value, which isn't runtime-checked for the same
-reason. Other arguments (`thread_id`, `task_id`, `writes`, `limit`, ...)
-are checked normally.
+checking would reject every real invocation. The same logic applies to
+`get_tuple`/`list`'s return value, which also isn't runtime-checked. Other
+arguments (`thread_id`, `task_id`, `writes`, `limit`, ...) are checked
+normally.
 
 ## Logging
 
@@ -258,9 +368,13 @@ storage read/write/list with the key or prefix touched.
   latency grow with checkpoint count, not just `list()` calls. See
   [`docs/adr/0001-slatedb.md`](docs/adr/0001-slatedb.md)
   for a proposed fix (currently a design proposal, not yet implemented).
-- No garbage collection or retention policy. Old checkpoints accumulate
-  until you call `delete_thread`, or you set up bucket lifecycle rules
-  yourself.
+- TTL is per-object age, not per-checkpoint-chain: a checkpoint's `writes`
+  objects are added later (via `put_writes`) and age out on their own
+  clock, so they can expire slightly before or after the checkpoint they
+  belong to. There's no read-time filtering either: an object past its TTL
+  is still returned by `get_tuple`/`list` until something actually deletes
+  it (a lifecycle rule run, or a `delete_expired()` call). See
+  [Checkpoint TTL](#checkpoint-ttl).
 - Two writers on the *same* `thread_id` writing concurrently can race, at
   the same guarantee level as the official sqlite saver (last write "wins"
   by whichever checkpoint_id sorts last, not by wall-clock order under
@@ -269,16 +383,18 @@ storage read/write/list with the key or prefix touched.
   yielding the first one (it wraps the async implementation via
   `asyncio.run`, which can't stream lazily). Use `alist()` from async code
   if you need true streaming.
-- Don't mix sync and async calls on the *same* `ObjectStorageSaver`
-  instance against S3 or GCS. Sync calls run on a persistent background
-  loop the underlying filesystem maintains; async calls run on whichever
-  loop the caller provides. The aiohttp session those backends use can
-  only belong to one loop at a time, so alternating between the two on
-  one instance breaks with `RuntimeError: ... attached to a different
-  loop`. Build a separate saver instance per usage style instead (see
-  `examples/uv/s3` vs `examples/uv/s3-async`, or `examples/poetry/gcs` vs
-  `examples/poetry/gcs-async`). Local filesystem isn't affected: it has no
-  persistent session to misalign.
+
+> [!WARNING]
+> Don't mix sync and async calls on the *same* `ObjectStorageSaver`
+> instance against S3 or GCS. Sync calls run on a persistent background
+> loop the underlying filesystem maintains; async calls run on whichever
+> loop the caller provides. The aiohttp session those backends use can
+> only belong to one loop at a time, so alternating between the two on one
+> instance breaks with `RuntimeError: ... attached to a different loop`.
+> Build a separate saver instance per usage style instead (see
+> `examples/uv/s3` vs `examples/uv/s3-async`, or `examples/poetry/gcs` vs
+> `examples/poetry/gcs-async`). Local filesystem isn't affected: it has no
+> persistent session to misalign.
 
 ## Development
 
@@ -337,10 +453,10 @@ placeholder line instead, so it's worth taking the extra minute.
 
 ### Releasing
 
-The `release` job only bumps `pyproject.toml` and `CHANGELOG.md` and
-pushes that commit to `main` -- it doesn't tag or publish anything.
-Publishing to PyPI is a manual step, since it's the one part of this
-pipeline that isn't reversible:
+The `release` job only bumps `pyproject.toml` and `CHANGELOG.md` and pushes
+that commit to `main`; it doesn't tag or publish anything. Publishing to
+PyPI is a manual step, since it's the one part of this pipeline that isn't
+reversible:
 
 ```bash
 git pull origin main
