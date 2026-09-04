@@ -25,6 +25,7 @@ bucket you probably already have.**
 - [Choosing a backend](#choosing-a-backend)
 - [Checkpoint TTL](#-checkpoint-ttl)
 - [Architecture](#architecture)
+- [Architecture decision records](#architecture-decision-records)
 - [Runtime type checking](#runtime-type-checking)
 - [Logging](#logging)
 - [Known limitations](#known-limitations)
@@ -311,10 +312,18 @@ Key technical decisions this reflects:
   storage has no query engine to push a filter into. See
   [Known limitations](#known-limitations).
 
-Decisions with real trade-offs get their own ADR under
-[`docs/adr/`](docs/adr/) — e.g.
-[0001](docs/adr/0001-checkpoint-ttl.md) on why TTL enforcement is
+## Architecture decision records
+
+Design proposals and decisions that change or extend the architecture
+above live under [`docs/adr/`](docs/adr/), not in this README:
+
+- [`0001-checkpoint-ttl.md`](docs/adr/0001-checkpoint-ttl.md) on why TTL enforcement is
 backend-specific instead of one mechanism for all three.
+- [`0002-slatedb.md`](docs/adr/0002-slatedb.md) --
+  proposal for an opt-in SlateDB-backed storage mode to bound
+  `get_tuple(latest)`/`list()` cost on threads with very large checkpoint
+  histories (see [Known limitations](#known-limitations)). Status:
+  proposed, not implemented.
 
 ## Runtime type checking
 
@@ -352,6 +361,13 @@ storage read/write/list with the key or prefix touched.
   engine to push the filter into. Fine for typical thread histories (dozens
   to low hundreds of checkpoints); a very long-running thread's `list` calls
   will get proportionally slower.
+- `get_tuple` without an explicit `checkpoint_id` (resolving "latest") pays
+  the same cost: it lists every checkpoint key under the thread/namespace to
+  find the newest one. Since this runs on every resume of an existing
+  thread, a thread with a very large checkpoint history will see resume
+  latency grow with checkpoint count, not just `list()` calls. See
+  [`docs/adr/0001-slatedb.md`](docs/adr/0001-slatedb.md)
+  for a proposed fix (currently a design proposal, not yet implemented).
 - TTL is per-object age, not per-checkpoint-chain: a checkpoint's `writes`
   objects are added later (via `put_writes`) and age out on their own
   clock, so they can expire slightly before or after the checkpoint they
