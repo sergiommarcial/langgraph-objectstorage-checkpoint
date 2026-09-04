@@ -43,8 +43,6 @@ Enforcement is backend-specific, on purpose:
   `now - ttl` via the existing `_rm` bridge. Caller-triggered only (cron,
   k8s CronJob, ...). The saver never spawns a background thread or timer.
 
-Full design detail: `docs/superpowers/specs/2026-09-03-checkpoint-ttl-design.md`.
-
 ## Alternatives considered
 
 ### A. Active sweep/delete in the saver as the only mechanism
