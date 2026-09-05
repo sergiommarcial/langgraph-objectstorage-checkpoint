@@ -448,6 +448,10 @@ backend-specific instead of one mechanism for all three.
 - [`0006-persistent-event-loop.md`](docs/adr/0006-persistent-event-loop.md)
   on the persistent background event loop behind local-disk sync calls,
   found via that benchmark suite's profiling.
+- [`0007-thread-export-import.md`](docs/adr/0007-thread-export-import.md) --
+  proposal for `export_thread`/`import_thread` methods to back up a
+  thread's checkpoint history or move it between local/S3/GCS. Status:
+  proposed, not implemented.
 
 ## Runtime type checking
 
