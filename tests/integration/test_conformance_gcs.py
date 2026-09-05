@@ -34,3 +34,27 @@ async def test_gcs_conformance(compression):
     report = await validate(_gcs_checkpointer, progress=ProgressCallbacks.default())
     report.print_report()
     assert report.passed_all_base()
+
+
+class _StaticKeyProvider:
+    def get_key(self, thread_id, key_id=None):
+        return "k1", b"0" * 32
+
+
+@pytest.mark.skipif(
+    not os.environ.get("GCS_TEST_BUCKET"),
+    reason="set GCS_TEST_BUCKET (+ GCP credentials) to run real-bucket GCS conformance",
+)
+async def test_gcs_conformance_with_encryption():
+    bucket = os.environ["GCS_TEST_BUCKET"]
+
+    @checkpointer_test(name="ObjectStorageSaver-gcs-encrypted")
+    async def _gcs_checkpointer():
+        prefix = f"{bucket}/{uuid.uuid4()}"
+        yield ObjectStorageSaver.from_conn_string(
+            f"gcs://{prefix}", encryption=_StaticKeyProvider()
+        )
+
+    report = await validate(_gcs_checkpointer, progress=ProgressCallbacks.default())
+    report.print_report()
+    assert report.passed_all_base()

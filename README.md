@@ -25,6 +25,7 @@ bucket you probably already have.**
 - [Choosing a backend](#choosing-a-backend)
 - [Checkpoint TTL](#-checkpoint-ttl)
 - [Compression](#-compression)
+- [Encryption](#-encryption)
 - [Architecture](#architecture)
 - [Architecture decision records](#architecture-decision-records)
 - [Runtime type checking](#runtime-type-checking)
@@ -57,7 +58,7 @@ bucket you probably already have.**
 >
 > **Not for:** workloads needing transactional guarantees across
 > checkpoints, or heavy concurrent writes to the *same* thread from
-> multiple writers — see [Known limitations](#known-limitations). For
+> multiple writers -- see [Known limitations](#known-limitations). For
 > those, the official `langgraph-checkpoint-postgres` saver is the better
 > fit.
 
@@ -65,7 +66,7 @@ bucket you probably already have.**
 
 |                          | This saver                      | `-sqlite` / `-postgres` |
 |--------------------------|----------------------------------|--------------------------|
-| Infra to run             | None — a bucket or a directory  | A database server        |
+| Infra to run             | None -- a bucket or a directory | A database server        |
 | Backend                  | Local disk, S3, or GCS           | SQLite or Postgres        |
 | `put`/`put_writes` model | Each call writes a new object    | Row inserts               |
 | `list(filter=...)`       | Client-side (see [Known limitations](#known-limitations)) | Pushed to SQL |
@@ -141,6 +142,10 @@ For [compression](#-compression): [`examples/uv/compression`](examples/uv/compre
 writes the same checkpoint with and without it, and prints the size
 difference on disk.
 
+For [encryption](#-encryption): [`examples/uv/encryption`](examples/uv/encryption)
+writes the same checkpoint with and without it, and checks whether a known
+plaintext value shows up in the raw object on disk either way.
+
 ## Choosing a backend
 
 Swap the connection string; everything else stays the same.
@@ -193,7 +198,7 @@ saver = ObjectStorageSaver.from_conn_string(
 `ttl=None` (the default) turns TTL off completely: nothing expires on its
 own, exactly like before this option existed. Setting `ttl` logs a
 one-time `WARNING` on construction as a reminder that the saver itself
-never deletes anything — there's no way for it to check whether a bucket
+never deletes anything -- there's no way for it to check whether a bucket
 lifecycle rule actually exists, so it just tells you what to go set up.
 
 **Local filesystem** has no built-in expiry, so you call `delete_expired()`
@@ -294,6 +299,64 @@ Compression runs synchronously on the event loop -- see
 Compressed objects also lose the plain-`cat`/`aws s3 cp` inspectability
 uncompressed objects have.
 
+## 🔒 Encryption
+
+Pass `encryption` with a `KeyProvider` implementation to encrypt checkpoint
+and write objects with AES-256-GCM before upload:
+
+```python
+class MyKeyProvider:
+    def get_key(self, thread_id: str, key_id: str | None = None) -> tuple[str, bytes]:
+        # key_id=None means "give me the current key to encrypt with";
+        # a specific key_id means "resolve exactly this historical key
+        # to decrypt with" -- wire up your KMS/Vault/static-key lookup here.
+        return "k1", my_32_byte_key
+
+saver = ObjectStorageSaver.from_conn_string(
+    "s3://my-bucket/checkpoints",
+    encryption=MyKeyProvider(),
+)
+```
+
+`encryption=None` (the default) is byte-identical to every release before
+this option existed -- nothing changes unless you opt in. Requires the
+`encryption` extra
+(`pip install "langgraph-checkpoint-objectstorage[encryption]"`).
+Requesting it without the extra installed raises `ImportError` immediately
+at construction.
+
+Every object records its own `key_id`, so rotating to a new key doesn't
+require migrating existing objects -- as long as your `KeyProvider` can
+still resolve every `key_id` it has ever issued. A single-key provider
+that ignores `key_id` and always returns the same key is a valid, minimal
+implementation if you don't need rotation.
+
+The AEAD's associated data is bound to the object's full storage identity:
+`thread_id`, `checkpoint_ns`, and `checkpoint_id` for a checkpoint, plus
+`task_id` and the write index for a pending write. Move an object to a
+different thread, namespace, checkpoint, task, or write index and it
+fails to decrypt, instead of silently decrypting under whatever key that
+new path resolves to. Once `encryption` is configured, reading an object
+that was never encrypted is also an error, not a silent pass-through.
+
+> [!NOTE]
+> Encryption here is symmetric AEAD (AES-256-GCM) only -- there's no
+> direct asymmetric (RSA/ECIES) payload encryption, since no real system
+> encrypts bulk data that way. Asymmetric key *management* (an RSA- or
+> KMS-wrapped data key) is still fully supported: it's entirely contained
+> inside your `KeyProvider` implementation, which the library treats as
+> opaque.
+
+> [!WARNING]
+> This only encrypts payload bytes. Object paths still encode `thread_id`,
+> `checkpoint_ns`, `checkpoint_id`, and task/channel names in plaintext --
+> anyone with bucket read access still sees thread activity patterns and
+> checkpoint cadence. Losing your `KeyProvider`'s ability to resolve a
+> `key_id` makes every object written under that key permanently
+> unreadable; there's no recovery path inside this library. See
+> [ADR 0004](docs/adr/0004-checkpoint-encryption.md) for the full design
+> and tradeoffs.
+
 ## Architecture
 
 Business logic (key layout, filtering, ordering, idempotency) is written
@@ -308,7 +371,7 @@ backend supports them (`s3fs`, `gcsfs`) and falls back to
 flowchart TD
     App["Your application<br/>(graph.invoke / ainvoke)"]
 
-    subgraph PublicAPI["Public API — BaseCheckpointSaver contract"]
+    subgraph PublicAPI["Public API (BaseCheckpointSaver contract)"]
         Sync["put / get_tuple / list /<br/>put_writes / delete_thread"]
         Async["aput / aget_tuple / alist /<br/>aput_writes / adelete_thread"]
     end
@@ -375,6 +438,9 @@ backend-specific instead of one mechanism for all three.
 - [`0003-checkpoint-compression.md`](docs/adr/0003-checkpoint-compression.md)
   on the pluggable codec registry and wire format behind the
   `compression` option.
+- [`0004-checkpoint-encryption.md`](docs/adr/0004-checkpoint-encryption.md)
+  on the `KeyProvider` protocol and AES-256-GCM wire format behind the
+  `encryption` option.
 
 ## Runtime type checking
 

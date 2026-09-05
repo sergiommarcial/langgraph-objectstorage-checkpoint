@@ -27,8 +27,8 @@ back to listing the object store and scanning the result:
 `ListObjectsV2`-style calls on S3/GCS. Cost and latency scale with the
 number of keys under the prefix, not with payload size, and each page is
 a billed, network-bound round trip. The `list(filter=...)` O(n) scan is
-already an accepted, documented non-goal (README "Known limitations",
-CLAUDE.md). But `get_tuple(latest)` paying that same full-prefix-listing
+already an accepted, documented non-goal (README "Known limitations").
+But `get_tuple(latest)` paying that same full-prefix-listing
 cost isn't something a consumer opts into. It happens on every resume,
 silently, and it gets worse the longer a thread's history gets (long
 loops, heavy retries, branching/time-travel workloads).
@@ -53,14 +53,14 @@ public API shape, or dependency footprint:
   how they construct the saver, and can't change default behavior in a
   way that surprises someone who upgrades a patch or minor version.
 - Core dependencies are deliberately backend-agnostic (`fsspec` only, per
-  CLAUDE.md's packaging conventions). Adding a new hard dependency is a
+  the project's packaging conventions). Adding a new hard dependency is a
   bigger call than it would be for an internal tool, since it lands on
   every consumer of the library, including ones on backends we can't
   test ourselves.
 - Whatever ships still has to pass the `BaseCheckpointSaver` conformance
   suite (`report.passed_all_base()`) unchanged for every backend,
   existing or new.
-- CLAUDE.md's own non-goals rule out GC, cross-checkpoint transactions,
+- The project's own non-goals rule out GC, cross-checkpoint transactions,
   and locking between same-thread concurrent writers. Anything proposed
   here has to either respect those or say plainly that it's asking to
   reopen one, and why.
@@ -97,10 +97,10 @@ business-logic methods (`_get_tuple`/`_put`/`_list`/`_put_writes`/
 this is additive to the async-core/sync-wrapper pattern already in
 place, not a parallel rewrite of it. `from_conn_string` picks the
 backend from the connection string's scheme, same as it picks an
-fsspec filesystem today. This does mean CLAUDE.md's architecture section
-needs a short update once this ships, to describe the backend interface
-alongside the "one class, backend chosen at construction" rule it
-already states.
+fsspec filesystem today. This does mean the project's architecture docs
+need a short update once this ships, to describe the backend interface
+alongside the "one class, backend chosen at construction" rule they
+already state.
 
 ### What changes for someone who opts in
 
@@ -245,5 +245,5 @@ a separately hosted service.
   default backend, is a separate decision and not blocked by this one.
 - A cross-backend migration tool (fsspec-backed history → SlateDB) is
   explicitly out of scope here; worth its own ADR if demand shows up.
-- CLAUDE.md's architecture section needs a short update once this ships
+- The project's architecture docs need a short update once this ships
   to describe the internal backend interface.

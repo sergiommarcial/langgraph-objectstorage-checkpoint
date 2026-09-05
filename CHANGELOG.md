@@ -9,13 +9,23 @@ which also updates this file).
 
 ## [Unreleased]
 
+### Added
+
+- `encryption` constructor param on `ObjectStorageSaver` (and
+  `from_conn_string`): a consumer-supplied `KeyProvider` implementation
+  encrypts each checkpoint/write object with AES-256-GCM before upload,
+  and decrypts on read. `None` (default) is byte-identical to every prior
+  release. The AEAD's associated data is bound to each object's full
+  storage identity (`thread_id`/`checkpoint_ns`/`checkpoint_id`, plus
+  `task_id`/index for writes), so an object moved to a different path
+  fails to decrypt instead of silently decrypting under the wrong key.
+  Each object records its own `key_id`, so key rotation and mixed
+  encrypted/unencrypted objects in the same bucket both work with no
+  migration step. Needs the new `encryption` extra. See
+  [ADR 0004](docs/adr/0004-checkpoint-encryption.md) and the README's
+  Encryption section.
+
 ## [0.1.10] - 2026-09-05
-
-### Changed
-
-- No changelog entries were added for this release.
-
-## [0.1.9] - 2026-09-05
 
 ### Added
 

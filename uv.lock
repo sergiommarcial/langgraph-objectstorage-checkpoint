@@ -1329,7 +1329,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-checkpoint-objectstorage"
-version = "0.1.8"
+version = "0.1.10"
 source = { editable = "." }
 dependencies = [
     { name = "fsspec" },
@@ -1342,6 +1342,9 @@ dependencies = [
 [package.optional-dependencies]
 compression = [
     { name = "zstandard" },
+]
+encryption = [
+    { name = "cryptography" },
 ]
 gcs = [
     { name = "gcsfs" },
@@ -1368,6 +1371,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "cryptography", marker = "extra == 'encryption'", specifier = ">=42" },
     { name = "fsspec", specifier = ">=2024.10.0" },
     { name = "gcsfs", marker = "extra == 'gcs'", specifier = ">=2024.10.0" },
     { name = "langchain-core", specifier = ">=0.2.38" },
@@ -1377,7 +1381,7 @@ requires-dist = [
     { name = "typeguard", specifier = ">=4.0" },
     { name = "zstandard", marker = "extra == 'compression'", specifier = ">=0.22" },
 ]
-provides-extras = ["s3", "gcs", "compression"]
+provides-extras = ["s3", "gcs", "compression", "encryption"]
 
 [package.metadata.requires-dev]
 dev = [

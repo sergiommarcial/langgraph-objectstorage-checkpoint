@@ -31,6 +31,16 @@ def test_write_key_negative_idx():
     assert key.endswith("task-1/-1.msgpack")
 
 
+def test_write_task_id_and_idx_from_key_round_trips():
+    key = keys.write_key("root", "thread-1", "", "ckpt-1", "task-1", 3)
+    assert keys.write_task_id_and_idx_from_key(key) == ("task-1", 3)
+
+
+def test_write_task_id_and_idx_from_key_negative_idx():
+    key = keys.write_key("root", "thread-1", "", "ckpt-1", "task-1", -1)
+    assert keys.write_task_id_and_idx_from_key(key) == ("task-1", -1)
+
+
 def test_thread_prefix_covers_all_namespaces():
     tp = keys.thread_prefix("root", "thread-1")
     for ns in ["", "child:1", "child:2"]:

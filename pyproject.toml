@@ -27,6 +27,7 @@ dependencies = [
 s3 = ["s3fs>=2024.10.0"]
 gcs = ["gcsfs>=2024.10.0"]
 compression = ["zstandard>=0.22"]
+encryption = ["cryptography>=42"]
 
 [dependency-groups]
 dev = [
