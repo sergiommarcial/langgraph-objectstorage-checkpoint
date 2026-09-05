@@ -11,9 +11,16 @@ which also updates this file).
 
 ## [0.1.9] - 2026-09-05
 
-### Changed
+### Added
 
-- No changelog entries were added for this release.
+- `compression` constructor param on `ObjectStorageSaver` (and
+  `from_conn_string`, as a keyword or a `?compression=...` connection-string
+  query parameter): `"none"` (default), `"zlib"`, `"lzma"`, or `"zstd"`
+  (needs the new `compression` extra). Each checkpoint/write object records
+  its own codec, so a bucket can mix codecs across deploys with no
+  migration step, and `"none"` output stays byte-identical to every prior
+  release. See [ADR 0003](docs/adr/0003-checkpoint-compression.md) and the
+  README's Compression section.
 
 ## [0.1.8] - 2026-09-04
 
