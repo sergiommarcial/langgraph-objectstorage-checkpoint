@@ -165,9 +165,8 @@ change. `saver.py`'s business-logic methods keep calling
 `pack_checkpoint`/`unpack_checkpoint`/`pack_write`/`unpack_write`
 exactly as today; the codec is threaded through `ObjectStorageSaver`'s
 constructor into those calls, not decided per-call. This is additive to
-the existing `keys.py`/`envelope.py`/`saver.py` separation of concerns
-(CLAUDE.md's Architecture conventions): no new module needed, and no
-existing module's responsibility changes.
+the existing `keys.py`/`envelope.py`/`saver.py` separation of concerns:
+no new module needed, and no existing module's responsibility changes.
 
 ### What changes for someone who opts in
 
@@ -312,7 +311,6 @@ requirement.
   (stop after finding enough matches) or eagerly (decompress every
   candidate up front) is an implementation detail for the eventual plan,
   not a design fork this ADR needs to settle.
-- README/CLAUDE.md need a short update once this ships: a new
-  "Compression" section (mirroring the existing "Checkpoint TTL"
-  section) and a packaging-conventions note for the new `compression`
-  extra.
+- README needs a short update once this ships: a new "Compression"
+  section (mirroring the existing "Checkpoint TTL" section) and a
+  packaging-conventions note for the new `compression` extra.

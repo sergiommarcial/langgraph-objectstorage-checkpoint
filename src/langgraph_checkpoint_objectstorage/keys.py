@@ -45,5 +45,12 @@ def write_key(
     return f"{prefix}{task_id}/{idx}.msgpack"
 
 
+def write_task_id_and_idx_from_key(key: str) -> tuple[str, int]:
+    _, task_id, filename = key.rsplit("/", 2)
+    if not filename.endswith(".msgpack"):
+        raise ValueError(f"not a write key: {key!r}")
+    return task_id, int(filename[: -len(".msgpack")])
+
+
 def thread_prefix(root: str, thread_id: str) -> str:
     return f"{root}/{thread_id}/"

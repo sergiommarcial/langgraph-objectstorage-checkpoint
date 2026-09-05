@@ -78,6 +78,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         root: str,
         ttl: timedelta | None = None,
         compression: str = "none",
+        encryption: envelope.KeyProvider | None = None,
     ) -> None:
         """Wrap an existing fsspec filesystem as a checkpoint store.
 
@@ -107,6 +108,18 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 configured value, so changing `compression` between
                 deploys is safe: old and new objects coexist and both stay
                 readable.
+            encryption: `KeyProvider` implementation used to encrypt each
+                checkpoint/write object with AES-256-GCM before upload,
+                and decrypt on read. `None` (default) disables encryption
+                -- byte-identical to the output before this option
+                existed. Requires the `encryption` extra (raises
+                `ImportError` here at construction time if requested
+                without it installed). Reads always decrypt using the
+                `key_id` recorded in the object itself, calling
+                `encryption.get_key(thread_id, key_id=...)` to resolve the
+                exact historical key, so key rotation and reading objects
+                written under a previous `KeyProvider` both work without a
+                migration step.
         """
         super().__init__()
         self.fs = fs
@@ -114,6 +127,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         self.ttl = ttl
         self.compression = compression
         self._codec_name = envelope.resolve_codec(compression)
+        self._key_provider = envelope.resolve_key_provider(encryption)
         self._is_async_native = isinstance(fs, AsyncFileSystem)
         level_name = os.environ.get(_LOG_LEVEL_ENV)
         if level_name:
@@ -136,6 +150,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         *,
         ttl: timedelta | None = None,
         compression: str = "none",
+        encryption: envelope.KeyProvider | None = None,
         **storage_options: Any,
     ) -> "ObjectStorageSaver":
         """Build a saver from an fsspec connection string.
@@ -150,6 +165,11 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 filesystem.
             ttl: Forwarded to `__init__` -- see its docstring.
             compression: Forwarded to `__init__` -- see its docstring.
+            encryption: Forwarded to `__init__` -- see its docstring.
+                Unlike `compression`, this can't be embedded as a
+                connection-string query parameter (a `KeyProvider` is an
+                object, not a string) -- pass it as a keyword argument
+                here.
             **storage_options: Forwarded to the underlying fsspec
                 filesystem constructor -- useful for explicit credentials
                 or a custom S3-compatible endpoint (MinIO, etc.).
@@ -167,12 +187,25 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             )
         storage_options.setdefault("skip_instance_cache", True)
         fs, path = fsspec.core.url_to_fs(conn_string, **storage_options)
-        return cls(fs, path, ttl=ttl, compression=compression)
+        return cls(fs, path, ttl=ttl, compression=compression, encryption=encryption)
 
     def _run_sync(self, func, *args, **kwargs):
         if self._is_async_native:
             return fsspec_sync(self.fs.loop, func, *args, **kwargs)
         return asyncio.run(func(*args, **kwargs))
+
+    async def _envelope_call(self, func, *args, **kwargs):
+        if self._key_provider is None:
+            return func(*args, **kwargs)
+        # KeyProvider.get_key is real blocking I/O (a KMS/Vault call), so the
+        # whole pack/unpack call -- serialize, compress, encrypt/decrypt --
+        # runs off the event loop together rather than hopping threads twice
+        # for one call. Bundling the (already-fast) serialize/compress work
+        # into the same hop is a deliberate simplification: compression-only
+        # savers still run inline, since nothing they do blocks.
+        return await asyncio.to_thread(
+            func, *args, key_provider=self._key_provider, **kwargs
+        )
 
     async def _cat(self, key: str) -> bytes:
         try:
@@ -250,7 +283,18 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         entries = []
         for key in write_keys:
             data = await self._cat(key)
-            entries.append(envelope.unpack_write(data))
+            path_task_id, path_idx = keys.write_task_id_and_idx_from_key(key)
+            entries.append(
+                await self._envelope_call(
+                    envelope.unpack_write,
+                    data,
+                    thread_id=thread_id,
+                    checkpoint_ns=checkpoint_ns,
+                    checkpoint_id=checkpoint_id,
+                    task_id=path_task_id,
+                    idx=path_idx,
+                )
+            )
         entries.sort(key=lambda e: (e[0], e[1]))
         return [(task_id, channel, value) for task_id, idx, channel, value in entries]
 
@@ -266,8 +310,15 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         parent_checkpoint_id = config["configurable"].get("checkpoint_id")
         full_metadata = get_checkpoint_metadata(config, metadata)
         key = keys.checkpoint_key(self.root, thread_id, checkpoint_ns, checkpoint_id)
-        data = envelope.pack_checkpoint(
-            checkpoint, full_metadata, parent_checkpoint_id, codec_name=self._codec_name
+        data = await self._envelope_call(
+            envelope.pack_checkpoint,
+            checkpoint,
+            full_metadata,
+            parent_checkpoint_id,
+            codec_name=self._codec_name,
+            thread_id=thread_id,
+            checkpoint_ns=checkpoint_ns,
+            checkpoint_id=checkpoint_id,
         )
         await self._pipe(key, data)
         return _cfg(thread_id, checkpoint_ns, checkpoint_id)
@@ -298,7 +349,13 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             data = await self._cat(key)
         except FileNotFoundError:
             return None
-        checkpoint, metadata, parent_checkpoint_id = envelope.unpack_checkpoint(data)
+        checkpoint, metadata, parent_checkpoint_id = await self._envelope_call(
+            envelope.unpack_checkpoint,
+            data,
+            thread_id=thread_id,
+            checkpoint_ns=checkpoint_ns,
+            checkpoint_id=checkpoint_id,
+        )
         parent_config = (
             _cfg(thread_id, checkpoint_ns, parent_checkpoint_id)
             if parent_checkpoint_id
@@ -338,8 +395,16 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                     actual_idx,
                 )
                 continue
-            data = envelope.pack_write(
-                task_id, actual_idx, channel, value, codec_name=self._codec_name
+            data = await self._envelope_call(
+                envelope.pack_write,
+                task_id,
+                actual_idx,
+                channel,
+                value,
+                codec_name=self._codec_name,
+                thread_id=thread_id,
+                checkpoint_ns=checkpoint_ns,
+                checkpoint_id=checkpoint_id,
             )
             await self._pipe(key, data)
 
@@ -364,8 +429,12 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             if before_id is not None and checkpoint_id >= before_id:
                 continue
             data = await self._cat(key)
-            checkpoint, metadata, parent_checkpoint_id = envelope.unpack_checkpoint(
-                data
+            checkpoint, metadata, parent_checkpoint_id = await self._envelope_call(
+                envelope.unpack_checkpoint,
+                data,
+                thread_id=thread_id,
+                checkpoint_ns=checkpoint_ns,
+                checkpoint_id=checkpoint_id,
             )
             if filter and not all(metadata.get(k) == v for k, v in filter.items()):
                 continue

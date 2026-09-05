@@ -12,12 +12,12 @@ Nothing is ever overwritten, and the only removal path is `delete_thread`,
 which a consumer has to call explicitly. Left alone, storage grows without
 bound for the lifetime of the deployment.
 
-CLAUDE.md lists garbage collection/retention as an explicit non-goal of
-the original design, with the caveat: "If a real need for one of those
-shows up, that's a new spec discussion, not a quiet addition." This ADR
-is that discussion. Unbounded growth is a real operational cost for any
-long-lived deployment, and "call `delete_thread` yourself, forever" isn't
-a complete answer for threads that should simply age out.
+Garbage collection/retention is an explicit non-goal of the original
+design, with the caveat that a real need for one is a new spec
+discussion, not a quiet addition. This ADR is that discussion. Unbounded
+growth is a real operational cost for any long-lived deployment, and
+"call `delete_thread` yourself, forever" isn't a complete answer for
+threads that should simply age out.
 
 ## Decision
 
@@ -93,8 +93,8 @@ so no external scheduler is needed.
 
 Rejected: hides an O(n) `fs.find()` inside what looks like a plain write,
 makes deletion timing nondeterministic, and is harder to test and reason
-about than an explicit, caller-triggered method. Also cuts against
-CLAUDE.md's existing stance of no hidden background coordination.
+about than an explicit, caller-triggered method. Also cuts against the
+project's existing stance of no hidden background coordination.
 
 ## Consequences
 
