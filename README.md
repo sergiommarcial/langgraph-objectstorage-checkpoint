@@ -31,6 +31,7 @@ bucket you probably already have.**
 - [Runtime type checking](#runtime-type-checking)
 - [Logging](#logging)
 - [Known limitations](#known-limitations)
+- [Performance](#-performance)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -441,6 +442,12 @@ backend-specific instead of one mechanism for all three.
 - [`0004-checkpoint-encryption.md`](docs/adr/0004-checkpoint-encryption.md)
   on the `KeyProvider` protocol and AES-256-GCM wire format behind the
   `encryption` option.
+- [`0005-performance-benchmarks.md`](docs/adr/0005-performance-benchmarks.md)
+  on the pytest-benchmark suite, its backend/envelope/scale matrix, and why
+  CI regression gating and load testing are deferred.
+- [`0006-persistent-event-loop.md`](docs/adr/0006-persistent-event-loop.md)
+  on the persistent background event loop behind local-disk sync calls,
+  found via that benchmark suite's profiling.
 
 ## Runtime type checking
 
@@ -513,6 +520,123 @@ storage read/write/list with the key or prefix touched.
 > `examples/poetry/gcs-async`). Local filesystem isn't affected: it has no
 > persistent session to misalign.
 
+## 📊 Performance
+
+<!-- BENCHMARK-RESULTS:START -->
+| Operation | Backend | Dimension | Mean (µs) | StdDev (µs) | Ops/sec | Notes |
+|---|---|---|---|---|---|---|
+| delete_thread | local | history_size=10 | 469.06 | 20.73 | 2131.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| delete_thread | local | history_size=100 | 2389.45 | 62.71 | 418.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| delete_thread | local | history_size=1000 | 29951.57 | 403.19 | 33.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| delete_thread | s3 | history_size=10 | 6726.01 | 3848.76 | 148.7 |  |
+| delete_thread | s3 | history_size=100 | 16841.60 | 5085.77 | 59.4 |  |
+| delete_thread | s3 | history_size=1000 | 120670.05 | 3387.40 | 8.3 |  |
+| put | local | envelope=plain | 174.88 | 68.00 | 5718.2 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=compression | 174.43 | 14.15 | 5732.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=encryption | 204.27 | 13.26 | 4895.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | s3 | envelope=plain | 2640.22 | 109.97 | 378.8 |  |
+| put | s3 | envelope=compression | 2616.59 | 74.97 | 382.2 |  |
+| put | s3 | envelope=encryption | 2701.21 | 158.98 | 370.2 |  |
+| get_tuple | local | envelope=plain | 186.55 | 13.04 | 5360.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=compression | 190.44 | 14.10 | 5251.1 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=encryption | 215.03 | 14.88 | 4650.6 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | s3 | envelope=plain | 6683.05 | 289.84 | 149.6 |  |
+| get_tuple | s3 | envelope=compression | 6684.86 | 414.28 | 149.6 |  |
+| get_tuple | s3 | envelope=encryption | 6880.38 | 233.57 | 145.3 |  |
+| put_writes | local | envelope=plain | 152.53 | 23.85 | 6556.0 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put_writes | local | envelope=compression | 158.87 | 12.73 | 6294.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put_writes | local | envelope=encryption | 186.30 | 13.62 | 5367.6 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put_writes | s3 | envelope=plain | 2550.23 | 89.27 | 392.1 |  |
+| put_writes | s3 | envelope=compression | 2533.29 | 422.45 | 394.7 |  |
+| put_writes | s3 | envelope=encryption | 2661.21 | 393.69 | 375.8 |  |
+| put | local | envelope=plain, payload_size=small | 174.48 | 48.52 | 5731.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=plain, payload_size=medium | 169.98 | 13.45 | 5883.0 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=plain, payload_size=large | 292.62 | 168.14 | 3417.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=compression, payload_size=small | 175.05 | 12.13 | 5712.8 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=compression, payload_size=medium | 181.75 | 22.93 | 5502.2 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=compression, payload_size=large | 333.08 | 22.86 | 3002.3 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=encryption, payload_size=small | 206.97 | 16.99 | 4831.7 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=encryption, payload_size=medium | 205.11 | 15.05 | 4875.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=encryption, payload_size=large | 462.13 | 625.71 | 2163.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | s3 | envelope=plain, payload_size=small | 2608.71 | 104.19 | 383.3 |  |
+| put | s3 | envelope=plain, payload_size=medium | 2827.90 | 317.61 | 353.6 |  |
+| put | s3 | envelope=plain, payload_size=large | 6326.03 | 778.58 | 158.1 |  |
+| put | s3 | envelope=compression, payload_size=small | 2606.16 | 96.02 | 383.7 |  |
+| put | s3 | envelope=compression, payload_size=medium | 2619.20 | 134.76 | 381.8 |  |
+| put | s3 | envelope=compression, payload_size=large | 2694.78 | 82.62 | 371.1 |  |
+| put | s3 | envelope=encryption, payload_size=small | 2795.94 | 212.95 | 357.7 |  |
+| put | s3 | envelope=encryption, payload_size=medium | 2716.96 | 104.17 | 368.1 |  |
+| put | s3 | envelope=encryption, payload_size=large | 6609.88 | 959.95 | 151.3 |  |
+| get_tuple | local | envelope=plain, payload_size=small | 184.86 | 16.59 | 5409.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=plain, payload_size=medium | 183.06 | 14.88 | 5462.7 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=plain, payload_size=large | 250.36 | 16.29 | 3994.3 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=compression, payload_size=small | 185.16 | 14.53 | 5400.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=compression, payload_size=medium | 190.57 | 29.68 | 5247.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=compression, payload_size=large | 283.14 | 17.03 | 3531.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=encryption, payload_size=small | 213.79 | 22.68 | 4677.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=encryption, payload_size=medium | 215.84 | 18.63 | 4633.0 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=encryption, payload_size=large | 404.59 | 25.04 | 2471.6 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | s3 | envelope=plain, payload_size=small | 6656.15 | 193.53 | 150.2 |  |
+| get_tuple | s3 | envelope=plain, payload_size=medium | 6820.87 | 1296.53 | 146.6 |  |
+| get_tuple | s3 | envelope=plain, payload_size=large | 8738.42 | 164.89 | 114.4 |  |
+| get_tuple | s3 | envelope=compression, payload_size=small | 6797.83 | 1321.62 | 147.1 |  |
+| get_tuple | s3 | envelope=compression, payload_size=medium | 6631.35 | 148.86 | 150.8 |  |
+| get_tuple | s3 | envelope=compression, payload_size=large | 7015.01 | 1485.27 | 142.6 |  |
+| get_tuple | s3 | envelope=encryption, payload_size=small | 6889.02 | 282.16 | 145.2 |  |
+| get_tuple | s3 | envelope=encryption, payload_size=medium | 8853.58 | 14973.55 | 112.9 |  |
+| get_tuple | s3 | envelope=encryption, payload_size=large | 9155.68 | 1494.45 | 109.2 |  |
+| get_tuple_latest | local | history_size=10 | 212.65 | 14.26 | 4702.6 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple_latest | local | history_size=100 | 478.30 | 22.23 | 2090.8 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple_latest | local | history_size=1000 | 3018.62 | 89.10 | 331.3 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple_latest | s3 | history_size=10 | 8032.48 | 1412.90 | 124.5 |  |
+| get_tuple_latest | s3 | history_size=100 | 16024.56 | 1535.72 | 62.4 |  |
+| get_tuple_latest | s3 | history_size=1000 | 99254.45 | 33323.66 | 10.1 |  |
+| list_filter | local | history_size=10 | 709.50 | 229.21 | 1409.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| list_filter | local | history_size=100 | 5174.76 | 466.95 | 193.2 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| list_filter | local | history_size=1000 | 52266.19 | 1050.01 | 19.1 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| list_filter | s3 | history_size=10 | 19705.82 | 541.82 | 50.7 |  |
+| list_filter | s3 | history_size=100 | 145612.52 | 2577.41 | 6.9 |  |
+| list_filter | s3 | history_size=1000 | 1452278.36 | 50613.10 | 0.7 |  |
+
+_Measured on 2026-09-05, on maintainer hardware against local disk and an in-process moto S3 emulator -- a relative comparison across operations/backends/envelopes, not an absolute production guarantee._
+<!-- BENCHMARK-RESULTS:END -->
+
+Each row is one operation, run repeatedly under one condition. `Dimension`
+says what's varied: `envelope=` is the compression/encryption setting
+(see [Compression](#-compression), [Encryption](#-encryption)),
+`history_size=` is how many checkpoints already existed in the thread
+being read from, written to, or deleted. A bigger history makes
+`delete_thread` and the two O(n) costs above slower; it doesn't affect a
+plain `put`/`get_tuple`/`put_writes` on a single checkpoint.
+
+`Mean` and `StdDev` are the average time per call and how much that time
+varied across runs, in microseconds (1,000 µs = 1 ms) -- a StdDev that's
+large relative to the mean means the operation's cost is inconsistent,
+not just slow. `Ops/sec` is the same mean turned into "calls per second"
+(1,000,000 / mean µs), which is often easier to compare across rows at a
+glance.
+
+`s3` rows are against an in-process moto emulator, not real AWS S3. Fine
+for comparing operations, backends, and envelopes against each other; not
+a real-network latency estimate.
+
+`Notes` links to the ADR responsible for a row's numbers, when one
+applies. Every `local` row currently points to
+[ADR 0006](docs/adr/0006-persistent-event-loop.md): all local-disk sync
+calls share the same persistent background event loop it introduced, so
+that one change touches every operation on that backend, not just a
+specific one.
+
+Benchmarks cover the hot path (`put`/`get_tuple`/`put_writes`), the
+documented O(n) costs above (`list(filter=...)`, `get_tuple(latest)`) at a
+few thread-history sizes, payload-size scaling, and `delete_thread` at
+scale, across local disk and an in-process moto S3 emulator, with plain,
+compressed, and encrypted envelopes. See
+[`docs/adr/0005-performance-benchmarks.md`](docs/adr/0005-performance-benchmarks.md)
+for the full design. Run them yourself with `make bench` (or
+`make bench-compare` / `make bench-report` -- see
+[Development](#development)).
+
 ## Development
 
 ```bash
@@ -522,6 +646,9 @@ make format          # apply black formatting in place
 make test            # full suite -- docker-compose integration tests auto-skip if not up
 make test-unit        # tests/unit only -- no external services, fast
 make test-integration  # tests/integration -- starts docker-compose emulators first
+make bench           # run performance benchmarks (local + in-process moto S3)
+make bench-compare   # compare the last two autosaved benchmark runs
+make bench-report    # regenerate the Performance table above + tests/benchmark/report.html
 ```
 
 `test`/`test-unit`/`test-integration`/`build` all run `lint` first, so a

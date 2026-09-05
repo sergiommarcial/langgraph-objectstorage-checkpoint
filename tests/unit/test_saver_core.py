@@ -1,3 +1,7 @@
+import asyncio
+import gc
+from concurrent.futures import ThreadPoolExecutor
+
 import fsspec
 
 from langgraph_checkpoint_objectstorage.saver import ObjectStorageSaver
@@ -138,3 +142,48 @@ async def test_read_pending_writes_empty_when_none(tmp_path):
     saver = make_saver(tmp_path)
     writes = await saver._read_pending_writes("t1", "", "ckpt-1")
     assert writes == []
+
+
+def test_sync_calls_reuse_same_background_loop(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    saver.put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+    first_loop = saver._bg_loop
+    assert first_loop is not None
+
+    saver.get_tuple(config)
+    assert saver._bg_loop is first_loop
+
+
+def test_concurrent_first_sync_calls_create_only_one_loop(tmp_path, monkeypatch):
+    saver = make_saver(tmp_path)
+    real_new_event_loop = asyncio.new_event_loop
+    call_count = {"n": 0}
+
+    def counting_new_event_loop():
+        call_count["n"] += 1
+        return real_new_event_loop()
+
+    monkeypatch.setattr(asyncio, "new_event_loop", counting_new_event_loop)
+
+    def do_put(i: int) -> None:
+        config = {"configurable": {"thread_id": f"race-{i}", "checkpoint_ns": ""}}
+        saver.put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(do_put, range(8)))
+
+    assert call_count["n"] == 1
+
+
+def test_saver_gc_stops_background_thread(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    saver.put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+    thread = saver._bg_thread
+    assert thread.is_alive()
+
+    del saver
+    gc.collect()
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()

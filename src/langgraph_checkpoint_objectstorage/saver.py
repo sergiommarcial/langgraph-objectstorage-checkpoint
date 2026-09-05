@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
+import weakref
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -54,6 +56,26 @@ def _mtime_of(info: Mapping[str, Any]) -> datetime:
     if isinstance(raw, (int, float)):
         return datetime.fromtimestamp(raw, tz=timezone.utc)
     return raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+
+
+_BG_LOOP_JOIN_TIMEOUT = 1.0
+
+
+def _stop_background_loop(
+    loop: asyncio.AbstractEventLoop, thread: threading.Thread
+) -> None:
+    # Module-level, not a method: weakref.finalize's callback must not
+    # reference `self`, or the saver being finalized would never become
+    # unreachable in the first place.
+    try:
+        loop.call_soon_threadsafe(loop.stop)
+        thread.join(timeout=_BG_LOOP_JOIN_TIMEOUT)
+    except Exception:
+        # Interpreter shutdown can tear down thread/module state in an
+        # unpredictable order. The loop's daemon thread is the real
+        # safety net for process exit; this is best-effort tidiness, so
+        # log rather than raise out of a finalizer.
+        logger.debug("background loop cleanup failed during finalize", exc_info=True)
 
 
 class ObjectStorageSaver(BaseCheckpointSaver):
@@ -129,6 +151,9 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         self._codec_name = envelope.resolve_codec(compression)
         self._key_provider = envelope.resolve_key_provider(encryption)
         self._is_async_native = isinstance(fs, AsyncFileSystem)
+        self._bg_loop: asyncio.AbstractEventLoop | None = None
+        self._bg_thread: threading.Thread | None = None
+        self._bg_loop_lock = threading.Lock()
         level_name = os.environ.get(_LOG_LEVEL_ENV)
         if level_name:
             logger.setLevel(level_name.upper())
@@ -189,10 +214,29 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         fs, path = fsspec.core.url_to_fs(conn_string, **storage_options)
         return cls(fs, path, ttl=ttl, compression=compression, encryption=encryption)
 
+    def _ensure_bg_loop(self) -> asyncio.AbstractEventLoop:
+        # Double-checked: the lock only matters for the first call from
+        # possibly several racing threads. Every call after that must
+        # stay lock-free, since this runs on every sync call against a
+        # non-async-native filesystem.
+        if self._bg_loop is not None:
+            return self._bg_loop
+        with self._bg_loop_lock:
+            if self._bg_loop is not None:
+                return self._bg_loop
+            loop = asyncio.new_event_loop()
+            thread = threading.Thread(target=loop.run_forever, daemon=True)
+            thread.start()
+            weakref.finalize(self, _stop_background_loop, loop, thread)
+            self._bg_loop = loop
+            self._bg_thread = thread
+            return loop
+
     def _run_sync(self, func, *args, **kwargs):
         if self._is_async_native:
             return fsspec_sync(self.fs.loop, func, *args, **kwargs)
-        return asyncio.run(func(*args, **kwargs))
+        loop = self._ensure_bg_loop()
+        return asyncio.run_coroutine_threadsafe(func(*args, **kwargs), loop).result()
 
     async def _envelope_call(self, func, *args, **kwargs):
         if self._key_provider is None:
