@@ -31,6 +31,7 @@ bucket you probably already have.**
 - [Runtime type checking](#runtime-type-checking)
 - [Logging](#logging)
 - [Known limitations](#known-limitations)
+- [Performance](#-performance)
 - [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
@@ -441,6 +442,9 @@ backend-specific instead of one mechanism for all three.
 - [`0004-checkpoint-encryption.md`](docs/adr/0004-checkpoint-encryption.md)
   on the `KeyProvider` protocol and AES-256-GCM wire format behind the
   `encryption` option.
+- [`0005-performance-benchmarks.md`](docs/adr/0005-performance-benchmarks.md)
+  on the pytest-benchmark suite, its backend/envelope/scale matrix, and why
+  CI regression gating and load testing are deferred.
 
 ## Runtime type checking
 
@@ -513,6 +517,116 @@ storage read/write/list with the key or prefix touched.
 > `examples/poetry/gcs-async`). Local filesystem isn't affected: it has no
 > persistent session to misalign.
 
+## 📊 Performance
+
+<!-- BENCHMARK-RESULTS:START -->
+| Operation | Backend | Dimension | Mean (µs) | StdDev (µs) | Ops/sec |
+|---|---|---|---|---|---|
+| delete_thread | local | history_size=10 | 627.54 | 42.11 | 1593.5 |
+| delete_thread | local | history_size=100 | 2920.88 | 235.09 | 342.4 |
+| delete_thread | local | history_size=1000 | 30799.93 | 1048.72 | 32.5 |
+| delete_thread | s3 | history_size=10 | 6095.93 | 4125.86 | 164.0 |
+| delete_thread | s3 | history_size=100 | 16224.42 | 3544.03 | 61.6 |
+| delete_thread | s3 | history_size=1000 | 128939.98 | 17553.68 | 7.8 |
+| put | local | envelope=plain | 358.80 | 42.75 | 2787.1 |
+| put | local | envelope=compression | 364.97 | 39.73 | 2739.9 |
+| put | local | envelope=encryption | 398.83 | 45.88 | 2507.3 |
+| put | s3 | envelope=plain | 2810.98 | 95.37 | 355.7 |
+| put | s3 | envelope=compression | 2606.70 | 98.74 | 383.6 |
+| put | s3 | envelope=encryption | 2775.83 | 171.92 | 360.3 |
+| get_tuple | local | envelope=plain | 358.80 | 20.11 | 2787.1 |
+| get_tuple | local | envelope=compression | 360.83 | 18.53 | 2771.4 |
+| get_tuple | local | envelope=encryption | 403.06 | 70.01 | 2481.0 |
+| get_tuple | s3 | envelope=plain | 7560.13 | 720.80 | 132.3 |
+| get_tuple | s3 | envelope=compression | 6687.80 | 442.00 | 149.5 |
+| get_tuple | s3 | envelope=encryption | 6881.88 | 372.41 | 145.3 |
+| put_writes | local | envelope=plain | 327.67 | 14.85 | 3051.9 |
+| put_writes | local | envelope=compression | 336.64 | 27.66 | 2970.5 |
+| put_writes | local | envelope=encryption | 385.30 | 96.14 | 2595.4 |
+| put_writes | s3 | envelope=plain | 2659.93 | 298.85 | 375.9 |
+| put_writes | s3 | envelope=compression | 2570.27 | 409.40 | 389.1 |
+| put_writes | s3 | envelope=encryption | 2738.51 | 441.81 | 365.2 |
+| put | local | envelope=plain, payload_size=small | 353.61 | 29.74 | 2828.0 |
+| put | local | envelope=plain, payload_size=medium | 346.29 | 14.51 | 2887.8 |
+| put | local | envelope=plain, payload_size=large | 493.69 | 488.24 | 2025.5 |
+| put | local | envelope=compression, payload_size=small | 362.53 | 42.33 | 2758.4 |
+| put | local | envelope=compression, payload_size=medium | 352.53 | 15.06 | 2836.6 |
+| put | local | envelope=compression, payload_size=large | 514.00 | 13.29 | 1945.5 |
+| put | local | envelope=encryption, payload_size=small | 384.81 | 13.03 | 2598.7 |
+| put | local | envelope=encryption, payload_size=medium | 388.84 | 25.03 | 2571.8 |
+| put | local | envelope=encryption, payload_size=large | 738.71 | 593.23 | 1353.7 |
+| put | s3 | envelope=plain, payload_size=small | 3133.40 | 384.85 | 319.1 |
+| put | s3 | envelope=plain, payload_size=medium | 2895.62 | 279.41 | 345.3 |
+| put | s3 | envelope=plain, payload_size=large | 6804.45 | 465.01 | 147.0 |
+| put | s3 | envelope=compression, payload_size=small | 2714.28 | 94.14 | 368.4 |
+| put | s3 | envelope=compression, payload_size=medium | 2644.87 | 115.14 | 378.1 |
+| put | s3 | envelope=compression, payload_size=large | 2806.82 | 106.51 | 356.3 |
+| put | s3 | envelope=encryption, payload_size=small | 2748.14 | 135.85 | 363.9 |
+| put | s3 | envelope=encryption, payload_size=medium | 3000.69 | 344.29 | 333.3 |
+| put | s3 | envelope=encryption, payload_size=large | 7078.69 | 346.61 | 141.3 |
+| get_tuple | local | envelope=plain, payload_size=small | 359.40 | 30.76 | 2782.4 |
+| get_tuple | local | envelope=plain, payload_size=medium | 350.82 | 20.82 | 2850.4 |
+| get_tuple | local | envelope=plain, payload_size=large | 419.16 | 23.46 | 2385.7 |
+| get_tuple | local | envelope=compression, payload_size=small | 361.87 | 22.81 | 2763.5 |
+| get_tuple | local | envelope=compression, payload_size=medium | 377.34 | 76.89 | 2650.2 |
+| get_tuple | local | envelope=compression, payload_size=large | 460.40 | 24.90 | 2172.0 |
+| get_tuple | local | envelope=encryption, payload_size=small | 383.16 | 19.37 | 2609.9 |
+| get_tuple | local | envelope=encryption, payload_size=medium | 386.56 | 27.22 | 2586.9 |
+| get_tuple | local | envelope=encryption, payload_size=large | 572.90 | 23.47 | 1745.5 |
+| get_tuple | s3 | envelope=plain, payload_size=small | 6721.25 | 176.19 | 148.8 |
+| get_tuple | s3 | envelope=plain, payload_size=medium | 6852.51 | 1221.11 | 145.9 |
+| get_tuple | s3 | envelope=plain, payload_size=large | 8997.25 | 796.39 | 111.1 |
+| get_tuple | s3 | envelope=compression, payload_size=small | 6859.95 | 702.23 | 145.8 |
+| get_tuple | s3 | envelope=compression, payload_size=medium | 6796.24 | 226.34 | 147.1 |
+| get_tuple | s3 | envelope=compression, payload_size=large | 7073.30 | 1205.31 | 141.4 |
+| get_tuple | s3 | envelope=encryption, payload_size=small | 6749.90 | 147.37 | 148.2 |
+| get_tuple | s3 | envelope=encryption, payload_size=medium | 6943.65 | 945.69 | 144.0 |
+| get_tuple | s3 | envelope=encryption, payload_size=large | 10226.24 | 2309.13 | 97.8 |
+| get_tuple_latest | local | history_size=10 | 397.56 | 42.80 | 2515.3 |
+| get_tuple_latest | local | history_size=100 | 650.98 | 25.95 | 1536.1 |
+| get_tuple_latest | local | history_size=1000 | 3233.24 | 121.58 | 309.3 |
+| get_tuple_latest | s3 | history_size=10 | 9620.09 | 15286.62 | 103.9 |
+| get_tuple_latest | s3 | history_size=100 | 15478.17 | 901.89 | 64.6 |
+| get_tuple_latest | s3 | history_size=1000 | 106448.52 | 31945.32 | 9.4 |
+| list_filter | local | history_size=10 | 913.88 | 264.15 | 1094.2 |
+| list_filter | local | history_size=100 | 6171.79 | 603.95 | 162.0 |
+| list_filter | local | history_size=1000 | 55962.47 | 1163.26 | 17.9 |
+| list_filter | s3 | history_size=10 | 23360.57 | 1237.32 | 42.8 |
+| list_filter | s3 | history_size=100 | 154299.98 | 11553.52 | 6.5 |
+| list_filter | s3 | history_size=1000 | 1531706.36 | 66551.40 | 0.7 |
+
+_Measured on 2026-09-05, on maintainer hardware against local disk and an in-process moto S3 emulator -- a relative comparison across operations/backends/envelopes, not an absolute production guarantee._
+<!-- BENCHMARK-RESULTS:END -->
+
+Each row is one operation, run repeatedly under one condition. `Dimension`
+says what's varied: `envelope=` is the compression/encryption setting
+(see [Compression](#-compression), [Encryption](#-encryption)),
+`history_size=` is how many checkpoints already existed in the thread
+being read from, written to, or deleted. A bigger history makes
+`delete_thread` and the two O(n) costs above slower; it doesn't affect a
+plain `put`/`get_tuple`/`put_writes` on a single checkpoint.
+
+`Mean` and `StdDev` are the average time per call and how much that time
+varied across runs, in microseconds (1,000 µs = 1 ms) -- a StdDev that's
+large relative to the mean means the operation's cost is inconsistent,
+not just slow. `Ops/sec` is the same mean turned into "calls per second"
+(1,000,000 / mean µs), which is often easier to compare across rows at a
+glance.
+
+`s3` rows are against an in-process moto emulator, not real AWS S3. Fine
+for comparing operations, backends, and envelopes against each other; not
+a real-network latency estimate.
+
+Benchmarks cover the hot path (`put`/`get_tuple`/`put_writes`), the
+documented O(n) costs above (`list(filter=...)`, `get_tuple(latest)`) at a
+few thread-history sizes, payload-size scaling, and `delete_thread` at
+scale, across local disk and an in-process moto S3 emulator, with plain,
+compressed, and encrypted envelopes. See
+[`docs/adr/0005-performance-benchmarks.md`](docs/adr/0005-performance-benchmarks.md)
+for the full design. Run them yourself with `make bench` (or
+`make bench-compare` / `make bench-report` -- see
+[Development](#development)).
+
 ## Development
 
 ```bash
@@ -522,6 +636,9 @@ make format          # apply black formatting in place
 make test            # full suite -- docker-compose integration tests auto-skip if not up
 make test-unit        # tests/unit only -- no external services, fast
 make test-integration  # tests/integration -- starts docker-compose emulators first
+make bench           # run performance benchmarks (local + in-process moto S3)
+make bench-compare   # compare the last two autosaved benchmark runs
+make bench-report    # regenerate the Performance table above + tests/benchmark/report.html
 ```
 
 `test`/`test-unit`/`test-integration`/`build` all run `lint` first, so a

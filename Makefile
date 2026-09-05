@@ -88,6 +88,18 @@ test-integration: lint compose-up ## Run integration tests (starts emulators fir
 	docker compose down; \
 	exit $$status
 
+.PHONY: bench
+bench: install ## Run performance benchmarks (local disk + in-process moto S3)
+	@$(UV) run pytest tests/benchmark --benchmark-only --benchmark-autosave --benchmark-json=.benchmarks/latest.json
+
+.PHONY: bench-compare
+bench-compare: ## Compare the last two autosaved benchmark runs
+	@$(UV) run pytest-benchmark compare --group-by=name
+
+.PHONY: bench-report
+bench-report: bench ## Run benchmarks, then update README's Performance table + tests/benchmark/report.html
+	@$(UV) run python tests/benchmark/report.py
+
 .PHONY: check-docker
 check-docker: ## Verify the Docker daemon is reachable
 	@if docker info >/dev/null 2>&1; then \
