@@ -18,8 +18,7 @@ def _row(benchmark: dict) -> dict:
     info = benchmark["extra_info"]
     stats = benchmark["stats"]
     dimension = (
-        ", ".join(f"{key}={info[key]}" for key in _DIMENSION_KEYS if key in info)
-        or "-"
+        ", ".join(f"{key}={info[key]}" for key in _DIMENSION_KEYS if key in info) or "-"
     )
     return {
         "operation": info.get("operation", "?"),
