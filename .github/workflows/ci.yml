@@ -16,7 +16,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # `lint`/`test-unit`/`bench` skip themselves (and, by extension via
+  # `needs:`, `test-integration` and `release` too) on the release job's
+  # own version-bump push to `main` -- otherwise that push would
+  # re-trigger this workflow, whose `release` job would bump the version
+  # again, push again, and loop forever. This is scoped to `ci.yml` only:
+  # unlike a `[skip ci]` commit-message marker, it has no effect on
+  # publish.yml's separate tag-push trigger.
   lint:
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -26,6 +34,7 @@ jobs:
       - run: make lint
 
   test-unit:
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -58,6 +67,7 @@ jobs:
     # regression threshold (see docs/adr/0005-performance-benchmarks.md's
     # Follow-up section). Runs independently of lint/test-unit/
     # test-integration and isn't a `release` dependency.
+    if: github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore(release):')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -126,6 +136,6 @@ jobs:
       - name: Commit version bump
         run: |
           git add pyproject.toml CHANGELOG.md
-          git commit -m "chore(release): v${NEW_VERSION} [skip ci]"
+          git commit -m "chore(release): v${NEW_VERSION}"
       - name: Push version bump
         run: git push origin main

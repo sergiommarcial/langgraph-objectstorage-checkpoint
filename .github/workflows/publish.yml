@@ -4,19 +4,27 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and publish (e.g. v0.1.12) -- for recovering a tag push that never triggered this workflow"
+        required: true
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
 
       - name: Verify tag matches package version
         run: |
-          tag_version="${GITHUB_REF_NAME#v}"
+          tag_name="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}"
+          tag_version="${tag_name#v}"
           pkg_version=$(grep -m1 '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')
           if [ "$tag_version" != "$pkg_version" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match pyproject.toml version $pkg_version" >&2
+            echo "Tag $tag_name does not match pyproject.toml version $pkg_version" >&2
             exit 1
           fi
 
