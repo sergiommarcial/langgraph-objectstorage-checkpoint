@@ -3,7 +3,9 @@ import gc
 from concurrent.futures import ThreadPoolExecutor
 
 import fsspec
+import pytest
 
+from langgraph_checkpoint_objectstorage import archive, keys
 from langgraph_checkpoint_objectstorage.saver import ObjectStorageSaver
 
 
@@ -187,3 +189,205 @@ def test_saver_gc_stops_background_thread(tmp_path):
     gc.collect()
     thread.join(timeout=2.0)
     assert not thread.is_alive()
+
+
+# --- export/import ---
+
+
+async def test_export_thread_covers_all_namespaces(tmp_path):
+    saver = make_saver(tmp_path)
+    for ns in ["", "child:1"]:
+        config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ns}}
+        await saver._put(config, _checkpoint(f"ckpt-{ns or 'root'}"), {"step": 0}, {})
+
+    packed = await saver._export_thread("t1")
+    entries = archive.unpack(packed)
+
+    root = str(tmp_path)
+    expected_paths = {
+        keys.checkpoint_key(root, "t1", ns, f"ckpt-{ns or 'root'}")[len(root) + 1 :]
+        for ns in ["", "child:1"]
+    }
+    assert set(entries) == expected_paths
+
+
+async def test_export_thread_missing_thread_raises_keyerror(tmp_path):
+    saver = make_saver(tmp_path)
+    with pytest.raises(KeyError):
+        await saver._export_thread("nope")
+
+
+async def test_export_import_thread_round_trip_restores_full_history(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    stored1 = await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+    config2 = {
+        "configurable": {
+            "thread_id": "t1",
+            "checkpoint_ns": "",
+            "checkpoint_id": stored1["configurable"]["checkpoint_id"],
+        }
+    }
+    stored2 = await saver._put(config2, _checkpoint("ckpt-2"), {"step": 1}, {})
+    await saver._put_writes(stored2, [("ch", "val")], "task-1")
+
+    packed = await saver._export_thread("t1")
+    await saver._delete_thread("t1")
+    assert await saver._get_tuple(config) is None
+
+    await saver._import_thread(packed)
+
+    tup = await saver._get_tuple(
+        {
+            "configurable": {
+                "thread_id": "t1",
+                "checkpoint_ns": "",
+                "checkpoint_id": "ckpt-2",
+            }
+        }
+    )
+    assert tup is not None
+    assert tup.checkpoint["id"] == "ckpt-2"
+    assert tup.parent_config["configurable"]["checkpoint_id"] == "ckpt-1"
+    assert tup.pending_writes == [("task-1", "ch", "val")]
+
+
+async def test_import_thread_with_dest_thread_id_renames(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+
+    packed = await saver._export_thread("t1")
+    await saver._import_thread(packed, dest_thread_id="t2")
+
+    renamed = await saver._get_tuple(
+        {"configurable": {"thread_id": "t2", "checkpoint_ns": ""}}
+    )
+    assert renamed is not None
+    assert renamed.checkpoint["id"] == "ckpt-1"
+
+    original = await saver._get_tuple(config)
+    assert original is not None
+    assert original.checkpoint["id"] == "ckpt-1"
+
+
+async def test_import_thread_overwrite_false_writes_nothing_on_conflict(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+    await saver._put(
+        {
+            "configurable": {
+                "thread_id": "t1",
+                "checkpoint_ns": "",
+                "checkpoint_id": "ckpt-1",
+            }
+        },
+        _checkpoint("ckpt-2"),
+        {"step": 1},
+        {},
+    )
+    packed = await saver._export_thread("t1")
+
+    conflict_key = keys.checkpoint_key(str(tmp_path), "t2", "", "ckpt-1")
+    await saver._pipe(conflict_key, b"dummy")
+
+    with pytest.raises(FileExistsError):
+        await saver._import_thread(packed, dest_thread_id="t2", overwrite=False)
+
+    dest_prefix = keys.thread_prefix(str(tmp_path), "t2")
+    assert await saver._find(dest_prefix) == [conflict_key]
+    assert await saver._cat(conflict_key) == b"dummy"
+
+
+async def test_import_thread_overwrite_true_replaces_existing(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+    packed = await saver._export_thread("t1")
+
+    conflict_key = keys.checkpoint_key(str(tmp_path), "t2", "", "ckpt-1")
+    await saver._pipe(conflict_key, b"dummy")
+
+    await saver._import_thread(packed, dest_thread_id="t2", overwrite=True)
+
+    assert await saver._cat(conflict_key) != b"dummy"
+    tup = await saver._get_tuple(
+        {"configurable": {"thread_id": "t2", "checkpoint_ns": ""}}
+    )
+    assert tup.checkpoint["id"] == "ckpt-1"
+
+
+async def test_import_thread_multiple_thread_ids_in_archive_raises(tmp_path):
+    saver = make_saver(tmp_path)
+    bad_archive = archive.pack(
+        {
+            "t1/checkpoints/ckpt-1.msgpack": b"x",
+            "t2/checkpoints/ckpt-1.msgpack": b"y",
+        }
+    )
+    with pytest.raises(ValueError, match="distinct thread_id"):
+        await saver._import_thread(bad_archive)
+
+
+async def test_import_thread_empty_archive_raises(tmp_path):
+    saver = make_saver(tmp_path)
+    with pytest.raises(ValueError, match="distinct thread_id"):
+        await saver._import_thread(archive.pack({}))
+
+
+async def test_export_thread_rejects_thread_id_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    with pytest.raises(ValueError, match="contains '/'"):
+        await saver._export_thread("team/proj-1")
+
+
+async def test_import_thread_rejects_dest_thread_id_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+    packed = await saver._export_thread("t1")
+
+    with pytest.raises(ValueError, match="contains '/'"):
+        await saver._import_thread(packed, dest_thread_id="team/proj-1")
+
+
+async def test_import_thread_rejects_path_traversal_archive(tmp_path):
+    saver = make_saver(tmp_path)
+    malicious = archive.pack({"../escape.txt": b"PWNED"})
+
+    with pytest.raises(ValueError, match="unsafe path"):
+        await saver._import_thread(malicious)
+
+    assert not (tmp_path.parent / "escape.txt").exists()
+
+
+# --- thread_id/checkpoint_ns validation ---
+
+
+async def test_put_rejects_thread_id_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "team/proj-1", "checkpoint_ns": ""}}
+    with pytest.raises(ValueError, match="thread_id"):
+        await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+
+
+async def test_put_rejects_checkpoint_ns_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": "a/b"}}
+    with pytest.raises(ValueError, match="checkpoint_ns"):
+        await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+
+
+async def test_get_tuple_rejects_thread_id_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    with pytest.raises(ValueError, match="thread_id"):
+        await saver._get_tuple(
+            {"configurable": {"thread_id": "team/proj-1", "checkpoint_ns": ""}}
+        )
+
+
+async def test_delete_thread_rejects_thread_id_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    with pytest.raises(ValueError, match="thread_id"):
+        await saver._delete_thread("team/proj-1")

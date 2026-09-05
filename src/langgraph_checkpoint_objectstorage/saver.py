@@ -25,16 +25,29 @@ from langgraph.checkpoint.base import (
 )
 from typeguard import typechecked
 
-from langgraph_checkpoint_objectstorage import envelope, keys
+from langgraph_checkpoint_objectstorage import archive, envelope, keys
 
 logger = logging.getLogger("langgraph_checkpoint_objectstorage")
 
 _LOG_LEVEL_ENV = "LANGGRAPH_CHECKPOINT_OBJECTSTORAGE_LOG_LEVEL"
 
 
+def _check_no_slash(label: str, value: str) -> None:
+    if "/" in value:
+        raise ValueError(
+            f"{label}={value!r} contains '/': this saver's key layout joins "
+            f"{label} with '/' as a path separator, so a value containing it "
+            f"can collide with a different thread_id/checkpoint_ns pair"
+        )
+
+
 def _thread_ns(config: RunnableConfig) -> tuple[str, str]:
     configurable = config["configurable"]
-    return configurable["thread_id"], configurable.get("checkpoint_ns", "")
+    thread_id = configurable["thread_id"]
+    checkpoint_ns = configurable.get("checkpoint_ns", "")
+    _check_no_slash("thread_id", thread_id)
+    _check_no_slash("checkpoint_ns", checkpoint_ns)
+    return thread_id, checkpoint_ns
 
 
 def _cfg(
@@ -56,6 +69,16 @@ def _mtime_of(info: Mapping[str, Any]) -> datetime:
     if isinstance(raw, (int, float)):
         return datetime.fromtimestamp(raw, tz=timezone.utc)
     return raw if raw.tzinfo is not None else raw.replace(tzinfo=timezone.utc)
+
+
+def _source_thread_id(entries: dict[str, bytes]) -> str:
+    thread_ids = {keys.thread_id_from_relative_key(path) for path in entries}
+    if len(thread_ids) != 1:
+        raise ValueError(
+            f"archive contains {len(thread_ids)} distinct thread_id prefixes "
+            f"{sorted(thread_ids)!r}; expected exactly one"
+        )
+    return next(iter(thread_ids))
 
 
 _BG_LOOP_JOIN_TIMEOUT = 1.0
@@ -502,11 +525,58 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 return
 
     async def _delete_thread(self, thread_id: str) -> None:
+        _check_no_slash("thread_id", thread_id)
         prefix = keys.thread_prefix(self.root, thread_id)
         try:
             await self._rm(prefix)
         except FileNotFoundError:
             pass
+
+    async def _export_thread(self, thread_id: str) -> bytes:
+        if "/" in thread_id:
+            raise ValueError(
+                f"thread_id {thread_id!r} contains '/', which export_thread can't "
+                "represent unambiguously in an archive's flat path layout"
+            )
+        prefix = keys.thread_prefix(self.root, thread_id)
+        try:
+            found = await self._find(prefix)
+        except FileNotFoundError:
+            found = []
+        if not found:
+            raise KeyError(thread_id)
+        entries = {}
+        for key in found:
+            data = await self._cat(key)
+            entries[key[len(self.root) + 1 :]] = data
+        return archive.pack(entries)
+
+    async def _import_thread(
+        self,
+        archive_bytes: bytes,
+        *,
+        dest_thread_id: str | None = None,
+        overwrite: bool = False,
+    ) -> None:
+        entries = archive.unpack(archive_bytes)
+        source_thread_id = _source_thread_id(entries)
+        if dest_thread_id is not None and "/" in dest_thread_id:
+            raise ValueError(
+                f"dest_thread_id {dest_thread_id!r} contains '/', which "
+                "import_thread can't represent unambiguously in the "
+                "destination's flat path layout"
+            )
+        target_thread_id = dest_thread_id or source_thread_id
+        dest_entries = {
+            f"{self.root}/{target_thread_id}{rel[len(source_thread_id):]}": data
+            for rel, data in entries.items()
+        }
+        if not overwrite:
+            for key in dest_entries:
+                if await self._exists(key):
+                    raise FileExistsError(key)
+        for key, data in dest_entries.items():
+            await self._pipe(key, data)
 
     async def _delete_expired(self) -> None:
         if self.ttl is None:
@@ -563,6 +633,24 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         """Async variant of `delete_thread`. See `delete_thread` for details."""
         await self._delete_thread(thread_id)
 
+    @typechecked
+    async def aexport_thread(self, thread_id: str) -> bytes:
+        """Async variant of `export_thread`. See `export_thread` for details."""
+        return await self._export_thread(thread_id)
+
+    @typechecked
+    async def aimport_thread(
+        self,
+        archive: bytes,
+        *,
+        dest_thread_id: str | None = None,
+        overwrite: bool = False,
+    ) -> None:
+        """Async variant of `import_thread`. See `import_thread` for details."""
+        await self._import_thread(
+            archive, dest_thread_id=dest_thread_id, overwrite=overwrite
+        )
+
     async def adelete_expired(self) -> None:
         """Async variant of `delete_expired`. See `delete_expired` for details."""
         await self._delete_expired()
@@ -583,6 +671,12 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             The matching `CheckpointTuple`, or `None` if no checkpoint
             exists for that thread/namespace/id -- never raises for
             "not found".
+
+        Raises:
+            ValueError: If `thread_id` or `checkpoint_ns` contains `/` --
+                this saver's key layout joins them with `/`, so a value
+                containing it could collide with a different
+                thread_id/checkpoint_ns pair.
         """
         return self._run_sync(self._get_tuple, config)
 
@@ -612,6 +706,12 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             first one (it wraps the async implementation via
             `asyncio.run`, which can't stream lazily) -- use `alist` from
             async code for true streaming.
+
+        Raises:
+            ValueError: If `thread_id` or `checkpoint_ns` contains `/` --
+                this saver's key layout joins them with `/`, so a value
+                containing it could collide with a different
+                thread_id/checkpoint_ns pair.
         """
 
         async def _collect() -> list[CheckpointTuple]:
@@ -648,6 +748,12 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         Returns:
             The config to use to fetch this exact checkpoint later
             (`configurable.thread_id`/`checkpoint_ns`/`checkpoint_id`).
+
+        Raises:
+            ValueError: If `thread_id` or `checkpoint_ns` contains `/` --
+                this saver's key layout joins them with `/`, so a value
+                containing it could collide with a different
+                thread_id/checkpoint_ns pair.
         """
         return self._run_sync(self._put, config, checkpoint, metadata, new_versions)
 
@@ -675,6 +781,12 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             task_id: Identifier for the task that produced these writes.
             task_path: Unused by this saver -- accepted for
                 `BaseCheckpointSaver` contract compatibility.
+
+        Raises:
+            ValueError: If `thread_id` or `checkpoint_ns` contains `/` --
+                this saver's key layout joins them with `/`, so a value
+                containing it could collide with a different
+                thread_id/checkpoint_ns pair.
         """
         self._run_sync(self._put_writes, config, writes, task_id, task_path)
 
@@ -686,8 +798,74 @@ class ObjectStorageSaver(BaseCheckpointSaver):
 
         Args:
             thread_id: The thread to delete.
+
+        Raises:
+            ValueError: If `thread_id` contains `/` -- this saver's key
+                layout uses `/` as a path separator, so a value containing
+                it could collide with a different thread_id.
         """
         self._run_sync(self._delete_thread, thread_id)
+
+    @typechecked
+    def export_thread(self, thread_id: str) -> bytes:
+        """Export a thread's full checkpoint history as an opaque archive.
+
+        Walks every checkpoint and write under `thread_id`, across every
+        `checkpoint_ns`, and packs the raw stored bytes into a tar
+        archive. The archive is opaque -- whatever compression or
+        encryption produced the underlying bytes stays exactly as-is, and
+        only `import_thread` can read it back.
+
+        Args:
+            thread_id: The thread to export.
+
+        Returns:
+            A tar-archive-formatted `bytes` object, suitable for backup or
+            for passing to `import_thread`.
+
+        Raises:
+            KeyError: If `thread_id` has no checkpoints.
+            ValueError: If `thread_id` contains `/` -- the archive's flat
+                path layout can't represent it unambiguously.
+        """
+        return self._run_sync(self._export_thread, thread_id)
+
+    @typechecked
+    def import_thread(
+        self,
+        archive: bytes,
+        *,
+        dest_thread_id: str | None = None,
+        overwrite: bool = False,
+    ) -> None:
+        """Import an archive produced by `export_thread`.
+
+        Args:
+            archive: Bytes produced by a prior `export_thread` call.
+            dest_thread_id: Thread to import into. Defaults to the
+                thread_id the archive was exported from. Renaming an
+                encrypted thread this way permanently breaks decryption
+                (AES-256-GCM's associated data is bound to `thread_id` --
+                see the README's Encryption section); only rename if
+                you're re-encrypting under the new `thread_id` yourself
+                before import.
+            overwrite: If `False` (default) and any destination key
+                already exists, raises without writing anything. Set
+                `True` to replace existing data.
+
+        Raises:
+            ValueError: If `archive` isn't a well-formed single-thread
+                archive (including an unsafe or malformed entry path), or
+                if `dest_thread_id` contains `/`.
+            FileExistsError: If a destination key already exists and
+                `overwrite` is `False`.
+        """
+        self._run_sync(
+            self._import_thread,
+            archive,
+            dest_thread_id=dest_thread_id,
+            overwrite=overwrite,
+        )
 
     def delete_expired(self) -> None:
         """Delete every checkpoint and write older than `ttl`.

@@ -1,6 +1,6 @@
 # ADR 0007: Thread export/import for backup and cross-backend migration
 
-- **Status:** Proposed
+- **Status:** Accepted (implemented)
 - **Date:** 2026-09-04
 - **Owners:** ObjectStorageSaver maintainers
 
@@ -99,6 +99,49 @@ it calls `_find`/`_cat` to gather bytes, hands them to `archive.py` to
 pack, and does the reverse for import, exactly the same shape as its
 other business-logic methods.
 
+`unpack` is the one place this module isn't purely mechanical: `archive`
+bytes handed to `import_thread` come from wherever a caller got them --
+a backup file, a network transfer, another team's export -- so `unpack`
+treats every entry path as untrusted input. An entry whose path is
+absolute or contains a `..` component is rejected with `ValueError`
+before `saver.py` ever turns it into a destination key; without this,
+an archive built with an entry like `"../../marker.txt"` would make
+`import_thread` write outside `root` entirely, since destination keys
+are built by plain string concatenation, not by anything that
+constrains the result to stay under the store root. `unpack` also wraps
+any `tarfile.TarError` (corrupt/non-tar bytes) into `ValueError`, so
+`import_thread`'s documented `ValueError` contract (see below) covers
+every way an `archive` argument can be malformed, not just the
+multiple-thread-ids case.
+
+### Input validation: thread_id can't contain `/`
+
+`export_thread` rejects a `thread_id` containing `/`, and `import_thread`
+rejects a `dest_thread_id` containing `/`, both with `ValueError`. The
+archive's paths are relative to `root` and encode `thread_id` as their
+first `/`-delimited segment (`keys.thread_id_from_relative_key`); a
+`thread_id` that itself contains `/` makes that encoding ambiguous --
+`import_thread` can't tell where the thread_id segment ends and the rest
+of the path (`checkpoint_ns`, `checkpoints`, ...) begins, and silently
+reconstructs the wrong destination path (only the first segment gets
+rewritten under `dest_thread_id`, leaving the rest of the original
+thread_id embedded where `checkpoint_ns` was expected). Rejecting at the
+`export_thread`/`import_thread` boundary closes this for the archive
+format specifically.
+
+The same ambiguity was also live for ordinary `put`/`get_tuple`/`list`/
+`put_writes`/`delete_thread` calls against a `thread_id` or
+`checkpoint_ns` containing `/` -- a pre-existing gap discovered while
+implementing this ADR, not introduced by it. That gap is closed too, in
+`_thread_ns`/`_delete_thread` (`saver.py`), by the same "reject `/` with
+`ValueError`" approach, rather than by changing the on-disk key format
+itself (`keys.py`'s `/`-joined layout is unchanged for every `thread_id`/
+`checkpoint_ns` that never contained `/`, which is every value that ever
+worked correctly). That fix is orthogonal to this ADR's own scope --
+it's a base-saver input-validation fix, not part of the export/import
+feature -- documented here only because this ADR's review is what
+surfaced it.
+
 ### Why raw bytes instead of re-serializing through the public API
 
 `export_thread` copies bytes verbatim rather than reading each checkpoint
@@ -119,6 +162,20 @@ tradeoff this makes against a more storage-format-independent option.
   under that same key, and importing it somewhere the original
   `KeyProvider` can't resolve that `key_id` makes it permanently
   unreadable there. Export/import doesn't re-key anything.
+- Renaming an encrypted thread via `dest_thread_id` permanently breaks
+  decryption. AES-256-GCM's associated data is bound to `thread_id`
+  (ADR 0004; see the README's Encryption section and
+  `test_decrypt_fails_when_object_moved_to_a_different_thread` in
+  `tests/unit/test_envelope.py`), so `import_thread` writing an encrypted
+  object under a different `thread_id` than it was encrypted under
+  guarantees `InvalidTag` on every future read of it, even with a
+  perfectly working `KeyProvider`. `import_thread` doesn't detect this at
+  import time: it stays opaque to `envelope.py`, the same way
+  `export_thread` does (see "Why raw bytes instead of re-serializing
+  through the public API"), so the import itself succeeds and the failure
+  only surfaces later, on read. Only rename an encrypted thread's archive
+  if you're also re-encrypting it under the destination `thread_id`
+  yourself before import -- something this ADR doesn't provide.
 - The whole archive is built and held in memory as `bytes`, so a very
   large thread's full history could be a real amount of memory to hold
   at once. See Follow-up.
@@ -175,7 +232,10 @@ SlateDB landing first.
 - Doesn't validate that an archive's contents will actually be usable at
   the destination. An encrypted archive imports fine as opaque bytes but
   can silently fail to decrypt later if the destination's `KeyProvider`
-  can't resolve the key it needs.
+  can't resolve the key it needs -- or, if `dest_thread_id` renamed it,
+  fails to decrypt unconditionally, regardless of `KeyProvider`
+  correctness, because AES-256-GCM's associated data is bound to
+  `thread_id` (see "What changes for someone who uses it").
 - Buffers a full thread's history in memory on both export and import;
   see Follow-up on streaming.
 - Two new public methods (times two for async) is real, permanent API

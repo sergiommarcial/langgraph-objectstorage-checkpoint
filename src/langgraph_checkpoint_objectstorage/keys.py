@@ -54,3 +54,7 @@ def write_task_id_and_idx_from_key(key: str) -> tuple[str, int]:
 
 def thread_prefix(root: str, thread_id: str) -> str:
     return f"{root}/{thread_id}/"
+
+
+def thread_id_from_relative_key(relative_key: str) -> str:
+    return relative_key.split("/", 1)[0]

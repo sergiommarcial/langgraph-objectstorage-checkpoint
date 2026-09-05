@@ -182,3 +182,37 @@ async def test_delete_thread_removes_all_namespaces(tmp_path):
     for ns in ["", "child:1"]:
         cfg = {"configurable": {"thread_id": "t1", "checkpoint_ns": ns}}
         assert await saver.aget_tuple(cfg) is None
+
+
+# --- export/import ---
+
+
+def test_sync_export_import_thread_round_trip(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    saver.put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+
+    packed = saver.export_thread("t1")
+    saver.delete_thread("t1")
+    assert saver.get_tuple(config) is None
+
+    saver.import_thread(packed)
+
+    tup = saver.get_tuple(config)
+    assert tup is not None
+    assert tup.checkpoint["id"] == "ckpt-1"
+
+
+async def test_async_export_import_thread_round_trip(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    await saver.aput(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+
+    packed = await saver.aexport_thread("t1")
+    await saver.adelete_thread("t1")
+
+    await saver.aimport_thread(packed)
+
+    tup = await saver.aget_tuple(config)
+    assert tup is not None
+    assert tup.checkpoint["id"] == "ckpt-1"

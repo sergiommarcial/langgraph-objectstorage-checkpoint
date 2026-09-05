@@ -52,3 +52,9 @@ def test_thread_prefix_distinct_threads_not_prefixes_of_each_other():
     assert not keys.thread_prefix("root", "thread-1").startswith(
         keys.thread_prefix("root", "thread-12")
     )
+
+
+def test_thread_id_from_relative_key_takes_first_segment():
+    key = keys.checkpoint_key("root", "thread-1", "", "ckpt-1")
+    relative = key[len("root") + 1 :]
+    assert keys.thread_id_from_relative_key(relative) == "thread-1"

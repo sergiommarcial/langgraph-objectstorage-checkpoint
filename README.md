@@ -26,6 +26,7 @@ bucket you probably already have.**
 - [Checkpoint TTL](#-checkpoint-ttl)
 - [Compression](#-compression)
 - [Encryption](#-encryption)
+- [Thread export and import](#-thread-export-and-import)
 - [Architecture](#architecture)
 - [Architecture decision records](#architecture-decision-records)
 - [Runtime type checking](#runtime-type-checking)
@@ -358,6 +359,43 @@ that was never encrypted is also an error, not a silent pass-through.
 > [ADR 0004](docs/adr/0004-checkpoint-encryption.md) for the full design
 > and tradeoffs.
 
+## 📤 Thread export and import
+
+`export_thread`/`aexport_thread` pack a thread's full checkpoint and write
+history -- across every `checkpoint_ns` -- into a portable tar archive.
+`import_thread`/`aimport_thread` restore one back, optionally under a new
+thread_id or into a different backend entirely (local disk, S3, GCS):
+
+```python
+archive = saver.export_thread("thread-1")
+
+dest_saver = ObjectStorageSaver.from_conn_string("gcs://my-bucket/checkpoints")
+dest_saver.import_thread(archive)
+```
+
+The archive is opaque bytes: whatever `compression`/`encryption` produced
+the underlying objects stays exactly as written, so reading the result
+back requires the same `KeyProvider` the source was encrypted under, if
+any.
+
+By default `import_thread` restores under the same thread_id the archive
+was exported from. Pass `dest_thread_id` to rename during import -- but
+never do this for an encrypted archive: AES-256-GCM's associated data is
+bound to `thread_id` (see [Encryption](#-encryption)), so a renamed,
+encrypted checkpoint fails to decrypt permanently, with no recovery path.
+
+By default, importing onto an existing key raises without writing
+anything; pass `overwrite=True` to replace it.
+
+> [!WARNING]
+> The whole archive is built and held in memory as `bytes` on both ends --
+> fine for typical thread histories, a real amount of memory for a very
+> large one. See [ADR 0007](docs/adr/0007-thread-export-import.md) for the
+> full design, including why this only moves data between
+> `ObjectStorageSaver` backends (local disk/S3/GCS), not to or from a
+> different `BaseCheckpointSaver` implementation like the official
+> Postgres/SQLite savers.
+
 ## Architecture
 
 Business logic (key layout, filtering, ordering, idempotency) is written
@@ -448,10 +486,10 @@ backend-specific instead of one mechanism for all three.
 - [`0006-persistent-event-loop.md`](docs/adr/0006-persistent-event-loop.md)
   on the persistent background event loop behind local-disk sync calls,
   found via that benchmark suite's profiling.
-- [`0007-thread-export-import.md`](docs/adr/0007-thread-export-import.md) --
-  proposal for `export_thread`/`import_thread` methods to back up a
-  thread's checkpoint history or move it between local/S3/GCS. Status:
-  proposed, not implemented.
+- [`0007-thread-export-import.md`](docs/adr/0007-thread-export-import.md)
+  on the `export_thread`/`import_thread` design: raw-bytes tar archives,
+  full-thread-only scope, and why renaming an encrypted thread on import
+  is unsafe.
 
 ## Runtime type checking
 
@@ -494,7 +532,7 @@ storage read/write/list with the key or prefix touched.
   find the newest one. Since this runs on every resume of an existing
   thread, a thread with a very large checkpoint history will see resume
   latency grow with checkpoint count, not just `list()` calls. See
-  [`docs/adr/0001-slatedb.md`](docs/adr/0001-slatedb.md)
+  [`docs/adr/0002-slatedb.md`](docs/adr/0002-slatedb.md)
   for a proposed fix (currently a design proposal, not yet implemented).
 - TTL is per-object age, not per-checkpoint-chain: a checkpoint's `writes`
   objects are added later (via `put_writes`) and age out on their own
@@ -511,6 +549,20 @@ storage read/write/list with the key or prefix touched.
   yielding the first one (it wraps the async implementation via
   `asyncio.run`, which can't stream lazily). Use `alist()` from async code
   if you need true streaming.
+- `export_thread`/`import_thread` buffer a full thread's history as
+  `bytes` in memory on both ends; there's no streaming variant yet.
+  Renaming an encrypted thread via `dest_thread_id` also permanently
+  breaks decryption -- see
+  [Thread export and import](#-thread-export-and-import).
+
+> [!WARNING]
+> `thread_id` and `checkpoint_ns` must not contain `/`. This saver's key
+> layout joins them with `/` as a path separator, so a value containing
+> one could collide with a different thread_id/checkpoint_ns pair's
+> storage keys -- one thread's checkpoints silently landing under
+> another's, no error, on either write or read. `put`/`get_tuple`/`list`/
+> `put_writes`/`delete_thread`, and `export_thread`/`import_thread`, all
+> raise `ValueError` if either contains `/`.
 
 > [!WARNING]
 > Don't mix sync and async calls on the *same* `ObjectStorageSaver`

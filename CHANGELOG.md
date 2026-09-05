@@ -9,6 +9,25 @@ which also updates this file).
 
 ## [Unreleased]
 
+### Added
+
+- `export_thread`/`aexport_thread` and `import_thread`/`aimport_thread` on
+  `ObjectStorageSaver`: pack a thread's full checkpoint/write history
+  (every `checkpoint_ns`) into a portable tar archive for backup, or to
+  move a thread between local disk, S3, and GCS. See
+  [ADR 0007](docs/adr/0007-thread-export-import.md).
+
+### Fixed
+
+- `put`/`get_tuple`/`list`/`put_writes`/`delete_thread` (and their async
+  variants) now raise `ValueError` if `thread_id` or `checkpoint_ns`
+  contains `/`. This saver's key layout joins them with `/`, so a value
+  containing it could silently collide with a different
+  thread_id/checkpoint_ns pair's storage keys -- discovered while
+  implementing `export_thread`/`import_thread` above. No on-disk format
+  change: every `thread_id`/`checkpoint_ns` that never contained `/` is
+  unaffected.
+
 ## [0.1.13] - 2026-09-05
 
 ### Changed
