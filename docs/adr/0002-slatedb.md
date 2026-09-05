@@ -1,4 +1,4 @@
-# ADR 0001: Optional SlateDB backend to bound `get_tuple(latest)` and `list()` cost as checkpoint count grows
+# ADR 0002: Optional SlateDB backend to bound `get_tuple(latest)` and `list()` cost as checkpoint count grows
 
 - **Status:** Proposed
 - **Date:** 2026-08-30

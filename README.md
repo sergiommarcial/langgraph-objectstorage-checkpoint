@@ -24,6 +24,7 @@ bucket you probably already have.**
 - [Examples](#examples)
 - [Choosing a backend](#choosing-a-backend)
 - [Checkpoint TTL](#-checkpoint-ttl)
+- [Compression](#-compression)
 - [Architecture](#architecture)
 - [Architecture decision records](#architecture-decision-records)
 - [Runtime type checking](#runtime-type-checking)
@@ -83,6 +84,7 @@ Python 3.11+.
 pip install langgraph-checkpoint-objectstorage        # local filesystem only
 pip install "langgraph-checkpoint-objectstorage[s3]"   # + AWS S3
 pip install "langgraph-checkpoint-objectstorage[gcs]"  # + Google Cloud Storage
+pip install "langgraph-checkpoint-objectstorage[compression]"  # + zstd codec
 ```
 
 ## ⚡ Quickstart
@@ -134,6 +136,10 @@ later, and the same pattern again run concurrently via the async API.
 
 Sequential and concurrent are separate examples rather than one combined
 script, see [Known limitations](#known-limitations) for why.
+
+For [compression](#-compression): [`examples/uv/compression`](examples/uv/compression)
+writes the same checkpoint with and without it, and prints the size
+difference on disk.
 
 ## Choosing a backend
 
@@ -246,6 +252,48 @@ deletion faster than the cloud provider's own cadence.
 > you configure by hand, though: `delete_expired()` itself treats `root` as
 > a real directory path, not a raw prefix, so it doesn't have this problem.
 
+## 🗜️ Compression
+
+Pass `compression` to shrink checkpoint and write objects before upload:
+
+```python
+saver = ObjectStorageSaver.from_conn_string(
+    "s3://my-bucket/checkpoints",
+    compression="lzma",
+)
+# or inline in the connection string:
+saver = ObjectStorageSaver.from_conn_string(
+    "s3://my-bucket/checkpoints?compression=lzma"
+)
+```
+
+`compression="none"` (the default) is byte-identical to every release
+before this option existed -- nothing changes unless you opt in. Accepted
+values:
+
+- `"none"` -- no compression (default).
+- `"zlib"` / `"lzma"` -- standard library, no extra dependency. `lzma`
+  compresses smaller but slower than `zlib`.
+- `"zstd"` -- faster than both at a comparable or better ratio, but needs
+  the `compression` extra
+  (`pip install "langgraph-checkpoint-objectstorage[compression]"`).
+  Requesting it without the extra installed raises `ImportError`
+  immediately at construction, not on the next `put`/`get_tuple`.
+
+Every object records its own codec, so changing `compression` between
+deploys of the same application is safe: old objects stay readable under
+whichever codec wrote them, new objects use the new one, and a bucket can
+mix codecs indefinitely with no migration step.
+
+Worth enabling for threads with large, compressible state (accumulated
+message history, JSON-like tool outputs); skip it for small checkpoints or
+already-compressed/high-entropy values (embeddings, binary blobs), where
+compression buys little and can even net-expand tiny payloads.
+Compression runs synchronously on the event loop -- see
+[ADR 0003](docs/adr/0003-checkpoint-compression.md) for the tradeoff.
+Compressed objects also lose the plain-`cat`/`aws s3 cp` inspectability
+uncompressed objects have.
+
 ## Architecture
 
 Business logic (key layout, filtering, ordering, idempotency) is written
@@ -324,6 +372,9 @@ backend-specific instead of one mechanism for all three.
   `get_tuple(latest)`/`list()` cost on threads with very large checkpoint
   histories (see [Known limitations](#known-limitations)). Status:
   proposed, not implemented.
+- [`0003-checkpoint-compression.md`](docs/adr/0003-checkpoint-compression.md)
+  on the pluggable codec registry and wire format behind the
+  `compression` option.
 
 ## Runtime type checking
 

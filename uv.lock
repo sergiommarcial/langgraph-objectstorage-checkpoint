@@ -1329,7 +1329,7 @@ wheels = [
 
 [[package]]
 name = "langgraph-checkpoint-objectstorage"
-version = "0.1.7"
+version = "0.1.8"
 source = { editable = "." }
 dependencies = [
     { name = "fsspec" },
@@ -1340,6 +1340,9 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+compression = [
+    { name = "zstandard" },
+]
 gcs = [
     { name = "gcsfs" },
 ]
@@ -1372,8 +1375,9 @@ requires-dist = [
     { name = "ormsgpack", specifier = ">=1.12.0" },
     { name = "s3fs", marker = "extra == 's3'", specifier = ">=2024.10.0" },
     { name = "typeguard", specifier = ">=4.0" },
+    { name = "zstandard", marker = "extra == 'compression'", specifier = ">=0.22" },
 ]
-provides-extras = ["s3", "gcs"]
+provides-extras = ["s3", "gcs", "compression"]
 
 [package.metadata.requires-dev]
 dev = [

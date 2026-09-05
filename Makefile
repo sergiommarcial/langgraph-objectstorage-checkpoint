@@ -82,8 +82,11 @@ test-unit: lint ## Run only unit tests (tests/unit -- no external services)
 	@$(UV) run pytest tests/unit
 
 .PHONY: test-integration
-test-integration: lint compose-up ## Run integration tests (starts docker-compose emulators first)
-	@$(UV) run pytest tests/integration
+test-integration: lint compose-up ## Run integration tests (starts emulators first, stops them after)
+	@status=0; \
+	$(UV) run pytest tests/integration || status=1; \
+	docker compose down; \
+	exit $$status
 
 .PHONY: check-docker
 check-docker: ## Verify the Docker daemon is reachable

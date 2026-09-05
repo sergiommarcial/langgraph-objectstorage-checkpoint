@@ -18,6 +18,34 @@ def _checkpoint(checkpoint_id: str) -> dict:
     }
 
 
+# --- from_conn_string compression ---
+
+
+def test_from_conn_string_compression_kwarg(tmp_path):
+    saver = ObjectStorageSaver.from_conn_string(
+        f"file://{tmp_path}", compression="zlib"
+    )
+    assert saver._codec_name == "zlib"
+
+
+def test_from_conn_string_compression_query_param(tmp_path):
+    saver = ObjectStorageSaver.from_conn_string(f"file://{tmp_path}?compression=lzma")
+    assert saver._codec_name == "lzma"
+    assert saver.root == str(tmp_path).rstrip("/")
+
+
+def test_from_conn_string_compression_query_param_overrides_kwarg(tmp_path):
+    saver = ObjectStorageSaver.from_conn_string(
+        f"file://{tmp_path}?compression=lzma", compression="zlib"
+    )
+    assert saver._codec_name == "lzma"
+
+
+def test_from_conn_string_default_compression_is_none(tmp_path):
+    saver = ObjectStorageSaver.from_conn_string(f"file://{tmp_path}")
+    assert saver._codec_name is None
+
+
 # --- sync API ---
 
 

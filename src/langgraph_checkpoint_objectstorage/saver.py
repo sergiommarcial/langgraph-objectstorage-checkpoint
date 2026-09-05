@@ -6,6 +6,7 @@ import os
 from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import fsspec
 from fsspec import AbstractFileSystem
@@ -72,7 +73,11 @@ class ObjectStorageSaver(BaseCheckpointSaver):
 
     @typechecked
     def __init__(
-        self, fs: AbstractFileSystem, root: str, ttl: timedelta | None = None
+        self,
+        fs: AbstractFileSystem,
+        root: str,
+        ttl: timedelta | None = None,
+        compression: str = "none",
     ) -> None:
         """Wrap an existing fsspec filesystem as a checkpoint store.
 
@@ -91,11 +96,24 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 lifecycle rule filtered by `root` to match (see the
                 README's Checkpoint TTL section); `delete_expired` works
                 there too as an optional immediate-delete alternative.
+            compression: Codec used to compress each checkpoint/write
+                object before upload: `"none"` (default -- byte-identical
+                to the output before this option existed), `"zlib"` or
+                `"lzma"` (stdlib, no extra dependency), or `"zstd"`
+                (requires the `compression` extra -- raises `ImportError`
+                here at construction time if requested without it
+                installed). Reads always decode using the codec recorded
+                in the object itself, independent of this saver's own
+                configured value, so changing `compression` between
+                deploys is safe: old and new objects coexist and both stay
+                readable.
         """
         super().__init__()
         self.fs = fs
         self.root = root.rstrip("/")
         self.ttl = ttl
+        self.compression = compression
+        self._codec_name = envelope.resolve_codec(compression)
         self._is_async_native = isinstance(fs, AsyncFileSystem)
         level_name = os.environ.get(_LOG_LEVEL_ENV)
         if level_name:
@@ -117,6 +135,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         conn_string: str,
         *,
         ttl: timedelta | None = None,
+        compression: str = "none",
         **storage_options: Any,
     ) -> "ObjectStorageSaver":
         """Build a saver from an fsspec connection string.
@@ -124,7 +143,13 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         Args:
             conn_string: An fsspec URI, e.g. `"file:///path"`,
                 `"s3://bucket/prefix"`, or `"gcs://bucket/prefix"`.
+                `compression` can be embedded here as a query parameter,
+                e.g. `"file:///path?compression=lzma"` -- it wins over the
+                `compression` keyword below if both are given, and is
+                always stripped before the URI is resolved to a
+                filesystem.
             ttl: Forwarded to `__init__` -- see its docstring.
+            compression: Forwarded to `__init__` -- see its docstring.
             **storage_options: Forwarded to the underlying fsspec
                 filesystem constructor -- useful for explicit credentials
                 or a custom S3-compatible endpoint (MinIO, etc.).
@@ -132,9 +157,17 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         Returns:
             A new `ObjectStorageSaver` backed by the resolved filesystem.
         """
+        parsed = urlsplit(conn_string)
+        query = parse_qs(parsed.query)
+        compression_values = query.pop("compression", None)
+        if compression_values:
+            compression = compression_values[-1]
+            conn_string = urlunsplit(
+                parsed._replace(query=urlencode(query, doseq=True))
+            )
         storage_options.setdefault("skip_instance_cache", True)
         fs, path = fsspec.core.url_to_fs(conn_string, **storage_options)
-        return cls(fs, path, ttl=ttl)
+        return cls(fs, path, ttl=ttl, compression=compression)
 
     def _run_sync(self, func, *args, **kwargs):
         if self._is_async_native:
@@ -233,7 +266,9 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         parent_checkpoint_id = config["configurable"].get("checkpoint_id")
         full_metadata = get_checkpoint_metadata(config, metadata)
         key = keys.checkpoint_key(self.root, thread_id, checkpoint_ns, checkpoint_id)
-        data = envelope.pack_checkpoint(checkpoint, full_metadata, parent_checkpoint_id)
+        data = envelope.pack_checkpoint(
+            checkpoint, full_metadata, parent_checkpoint_id, codec_name=self._codec_name
+        )
         await self._pipe(key, data)
         return _cfg(thread_id, checkpoint_ns, checkpoint_id)
 
@@ -303,7 +338,9 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                     actual_idx,
                 )
                 continue
-            data = envelope.pack_write(task_id, actual_idx, channel, value)
+            data = envelope.pack_write(
+                task_id, actual_idx, channel, value, codec_name=self._codec_name
+            )
             await self._pipe(key, data)
 
     async def _list(
