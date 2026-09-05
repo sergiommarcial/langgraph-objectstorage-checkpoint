@@ -9,6 +9,8 @@ which also updates this file).
 
 ## [Unreleased]
 
+## [0.1.11] - 2026-09-05
+
 ### Added
 
 - `encryption` constructor param on `ObjectStorageSaver` (and
