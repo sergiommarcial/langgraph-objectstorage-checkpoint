@@ -9,6 +9,8 @@ which also updates this file).
 
 ## [Unreleased]
 
+## [0.1.12] - 2026-09-05
+
 ### Changed
 
 - Sync calls (`put`/`get_tuple`/`list`/`put_writes`/`delete_thread`/
