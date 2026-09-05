@@ -20,13 +20,23 @@ def _row(benchmark: dict) -> dict:
     dimension = (
         ", ".join(f"{key}={info[key]}" for key in _DIMENSION_KEYS if key in info) or "-"
     )
+    backend = info.get("backend", "?")
+    # Every local-disk sync call routes through the persistent background
+    # loop from ADR 0006 -- s3 rows go through fsspec's own async-native
+    # path instead and are unaffected, so only local rows get the note.
+    notes = (
+        "[ADR 0006](docs/adr/0006-persistent-event-loop.md)"
+        if backend == "local"
+        else ""
+    )
     return {
         "operation": info.get("operation", "?"),
-        "backend": info.get("backend", "?"),
+        "backend": backend,
         "dimension": dimension,
         "mean_us": stats["mean"] * 1_000_000,
         "stddev_us": stats["stddev"] * 1_000_000,
         "ops": stats["ops"],
+        "notes": notes,
     }
 
 
@@ -39,13 +49,14 @@ def load_rows(json_path: Path) -> tuple[list[dict], str]:
 
 def render_markdown(rows: list[dict], measured_on: str) -> str:
     lines = [
-        "| Operation | Backend | Dimension | Mean (µs) | StdDev (µs) | Ops/sec |",
-        "|---|---|---|---|---|---|",
+        "| Operation | Backend | Dimension | Mean (µs) | StdDev (µs) | Ops/sec | Notes |",
+        "|---|---|---|---|---|---|---|",
     ]
     for row in rows:
         lines.append(
             f"| {row['operation']} | {row['backend']} | {row['dimension']} "
-            f"| {row['mean_us']:.2f} | {row['stddev_us']:.2f} | {row['ops']:.1f} |"
+            f"| {row['mean_us']:.2f} | {row['stddev_us']:.2f} | {row['ops']:.1f} "
+            f"| {row['notes']} |"
         )
     caveat = (
         f"_Measured on {measured_on}, on maintainer hardware against local "

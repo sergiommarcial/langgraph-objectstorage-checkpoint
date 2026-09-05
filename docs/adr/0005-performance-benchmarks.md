@@ -171,6 +171,12 @@ published numbers a maintainer decision.
 
 ## Follow-up / open questions
 
+- `.github/workflows/ci.yml` has a `bench` job that runs `make bench` and
+  uploads `.benchmarks/` as a build artifact on every push and PR. It's
+  informational only: it doesn't gate anything, isn't a `release`
+  dependency, and doesn't touch `README.md` (that stays the manual
+  `make bench-report` step below). This doesn't resolve the item below,
+  it just gives CI-run numbers to eventually build a baseline from.
 - CI regression gating (failing a PR past some threshold) is a separate
   future ADR. It needs accumulated baseline data first, and a decision on
   handling CI-runner/moto noise before a hard threshold is trustworthy.

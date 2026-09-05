@@ -9,6 +9,21 @@ which also updates this file).
 
 ## [Unreleased]
 
+### Changed
+
+- Sync calls (`put`/`get_tuple`/`list`/`put_writes`/`delete_thread`/
+  `delete_expired`) against local disk (or any other non-async-native
+  fsspec filesystem) now reuse a lazily-created, per-instance persistent
+  background event loop instead of building and tearing down a new one on
+  every call. No API change. Measured against local disk: `put` ~348µs to
+  ~175µs mean, a 50% reduction (~2,870 to ~5,720 ops/sec, +99%);
+  `get_tuple` ~360µs to ~187µs mean, a 48% reduction (~2,780 to ~5,360
+  ops/sec, +93%); `put_writes` ~326µs to ~153µs mean, a 53% reduction
+  (~3,070 to ~6,560 ops/sec, +114%). S3/GCS unaffected (already using a
+  persistent loop via `fsspec_sync`). See
+  [ADR 0006](docs/adr/0006-persistent-event-loop.md) and the README's
+  [Performance](#-performance) section.
+
 ## [0.1.11] - 2026-09-05
 
 ### Added

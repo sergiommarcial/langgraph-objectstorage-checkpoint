@@ -52,6 +52,24 @@ jobs:
       - if: always()
         run: docker compose down
 
+  bench:
+    # Informational only -- never fails the build. GitHub Actions runners
+    # are shared, variable hardware, not trustworthy for a hard pass/fail
+    # regression threshold (see docs/adr/0005-performance-benchmarks.md's
+    # Follow-up section). Runs independently of lint/test-unit/
+    # test-integration and isn't a `release` dependency.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+      - run: make bench
+      - uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: .benchmarks/
+
   release:
     needs: [lint, test-unit, test-integration]
     if: github.ref == 'refs/heads/main'

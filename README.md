@@ -520,80 +520,80 @@ storage read/write/list with the key or prefix touched.
 ## 📊 Performance
 
 <!-- BENCHMARK-RESULTS:START -->
-| Operation | Backend | Dimension | Mean (µs) | StdDev (µs) | Ops/sec |
-|---|---|---|---|---|---|
-| delete_thread | local | history_size=10 | 627.54 | 42.11 | 1593.5 |
-| delete_thread | local | history_size=100 | 2920.88 | 235.09 | 342.4 |
-| delete_thread | local | history_size=1000 | 30799.93 | 1048.72 | 32.5 |
-| delete_thread | s3 | history_size=10 | 6095.93 | 4125.86 | 164.0 |
-| delete_thread | s3 | history_size=100 | 16224.42 | 3544.03 | 61.6 |
-| delete_thread | s3 | history_size=1000 | 128939.98 | 17553.68 | 7.8 |
-| put | local | envelope=plain | 358.80 | 42.75 | 2787.1 |
-| put | local | envelope=compression | 364.97 | 39.73 | 2739.9 |
-| put | local | envelope=encryption | 398.83 | 45.88 | 2507.3 |
-| put | s3 | envelope=plain | 2810.98 | 95.37 | 355.7 |
-| put | s3 | envelope=compression | 2606.70 | 98.74 | 383.6 |
-| put | s3 | envelope=encryption | 2775.83 | 171.92 | 360.3 |
-| get_tuple | local | envelope=plain | 358.80 | 20.11 | 2787.1 |
-| get_tuple | local | envelope=compression | 360.83 | 18.53 | 2771.4 |
-| get_tuple | local | envelope=encryption | 403.06 | 70.01 | 2481.0 |
-| get_tuple | s3 | envelope=plain | 7560.13 | 720.80 | 132.3 |
-| get_tuple | s3 | envelope=compression | 6687.80 | 442.00 | 149.5 |
-| get_tuple | s3 | envelope=encryption | 6881.88 | 372.41 | 145.3 |
-| put_writes | local | envelope=plain | 327.67 | 14.85 | 3051.9 |
-| put_writes | local | envelope=compression | 336.64 | 27.66 | 2970.5 |
-| put_writes | local | envelope=encryption | 385.30 | 96.14 | 2595.4 |
-| put_writes | s3 | envelope=plain | 2659.93 | 298.85 | 375.9 |
-| put_writes | s3 | envelope=compression | 2570.27 | 409.40 | 389.1 |
-| put_writes | s3 | envelope=encryption | 2738.51 | 441.81 | 365.2 |
-| put | local | envelope=plain, payload_size=small | 353.61 | 29.74 | 2828.0 |
-| put | local | envelope=plain, payload_size=medium | 346.29 | 14.51 | 2887.8 |
-| put | local | envelope=plain, payload_size=large | 493.69 | 488.24 | 2025.5 |
-| put | local | envelope=compression, payload_size=small | 362.53 | 42.33 | 2758.4 |
-| put | local | envelope=compression, payload_size=medium | 352.53 | 15.06 | 2836.6 |
-| put | local | envelope=compression, payload_size=large | 514.00 | 13.29 | 1945.5 |
-| put | local | envelope=encryption, payload_size=small | 384.81 | 13.03 | 2598.7 |
-| put | local | envelope=encryption, payload_size=medium | 388.84 | 25.03 | 2571.8 |
-| put | local | envelope=encryption, payload_size=large | 738.71 | 593.23 | 1353.7 |
-| put | s3 | envelope=plain, payload_size=small | 3133.40 | 384.85 | 319.1 |
-| put | s3 | envelope=plain, payload_size=medium | 2895.62 | 279.41 | 345.3 |
-| put | s3 | envelope=plain, payload_size=large | 6804.45 | 465.01 | 147.0 |
-| put | s3 | envelope=compression, payload_size=small | 2714.28 | 94.14 | 368.4 |
-| put | s3 | envelope=compression, payload_size=medium | 2644.87 | 115.14 | 378.1 |
-| put | s3 | envelope=compression, payload_size=large | 2806.82 | 106.51 | 356.3 |
-| put | s3 | envelope=encryption, payload_size=small | 2748.14 | 135.85 | 363.9 |
-| put | s3 | envelope=encryption, payload_size=medium | 3000.69 | 344.29 | 333.3 |
-| put | s3 | envelope=encryption, payload_size=large | 7078.69 | 346.61 | 141.3 |
-| get_tuple | local | envelope=plain, payload_size=small | 359.40 | 30.76 | 2782.4 |
-| get_tuple | local | envelope=plain, payload_size=medium | 350.82 | 20.82 | 2850.4 |
-| get_tuple | local | envelope=plain, payload_size=large | 419.16 | 23.46 | 2385.7 |
-| get_tuple | local | envelope=compression, payload_size=small | 361.87 | 22.81 | 2763.5 |
-| get_tuple | local | envelope=compression, payload_size=medium | 377.34 | 76.89 | 2650.2 |
-| get_tuple | local | envelope=compression, payload_size=large | 460.40 | 24.90 | 2172.0 |
-| get_tuple | local | envelope=encryption, payload_size=small | 383.16 | 19.37 | 2609.9 |
-| get_tuple | local | envelope=encryption, payload_size=medium | 386.56 | 27.22 | 2586.9 |
-| get_tuple | local | envelope=encryption, payload_size=large | 572.90 | 23.47 | 1745.5 |
-| get_tuple | s3 | envelope=plain, payload_size=small | 6721.25 | 176.19 | 148.8 |
-| get_tuple | s3 | envelope=plain, payload_size=medium | 6852.51 | 1221.11 | 145.9 |
-| get_tuple | s3 | envelope=plain, payload_size=large | 8997.25 | 796.39 | 111.1 |
-| get_tuple | s3 | envelope=compression, payload_size=small | 6859.95 | 702.23 | 145.8 |
-| get_tuple | s3 | envelope=compression, payload_size=medium | 6796.24 | 226.34 | 147.1 |
-| get_tuple | s3 | envelope=compression, payload_size=large | 7073.30 | 1205.31 | 141.4 |
-| get_tuple | s3 | envelope=encryption, payload_size=small | 6749.90 | 147.37 | 148.2 |
-| get_tuple | s3 | envelope=encryption, payload_size=medium | 6943.65 | 945.69 | 144.0 |
-| get_tuple | s3 | envelope=encryption, payload_size=large | 10226.24 | 2309.13 | 97.8 |
-| get_tuple_latest | local | history_size=10 | 397.56 | 42.80 | 2515.3 |
-| get_tuple_latest | local | history_size=100 | 650.98 | 25.95 | 1536.1 |
-| get_tuple_latest | local | history_size=1000 | 3233.24 | 121.58 | 309.3 |
-| get_tuple_latest | s3 | history_size=10 | 9620.09 | 15286.62 | 103.9 |
-| get_tuple_latest | s3 | history_size=100 | 15478.17 | 901.89 | 64.6 |
-| get_tuple_latest | s3 | history_size=1000 | 106448.52 | 31945.32 | 9.4 |
-| list_filter | local | history_size=10 | 913.88 | 264.15 | 1094.2 |
-| list_filter | local | history_size=100 | 6171.79 | 603.95 | 162.0 |
-| list_filter | local | history_size=1000 | 55962.47 | 1163.26 | 17.9 |
-| list_filter | s3 | history_size=10 | 23360.57 | 1237.32 | 42.8 |
-| list_filter | s3 | history_size=100 | 154299.98 | 11553.52 | 6.5 |
-| list_filter | s3 | history_size=1000 | 1531706.36 | 66551.40 | 0.7 |
+| Operation | Backend | Dimension | Mean (µs) | StdDev (µs) | Ops/sec | Notes |
+|---|---|---|---|---|---|---|
+| delete_thread | local | history_size=10 | 469.06 | 20.73 | 2131.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| delete_thread | local | history_size=100 | 2389.45 | 62.71 | 418.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| delete_thread | local | history_size=1000 | 29951.57 | 403.19 | 33.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| delete_thread | s3 | history_size=10 | 6726.01 | 3848.76 | 148.7 |  |
+| delete_thread | s3 | history_size=100 | 16841.60 | 5085.77 | 59.4 |  |
+| delete_thread | s3 | history_size=1000 | 120670.05 | 3387.40 | 8.3 |  |
+| put | local | envelope=plain | 174.88 | 68.00 | 5718.2 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=compression | 174.43 | 14.15 | 5732.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=encryption | 204.27 | 13.26 | 4895.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | s3 | envelope=plain | 2640.22 | 109.97 | 378.8 |  |
+| put | s3 | envelope=compression | 2616.59 | 74.97 | 382.2 |  |
+| put | s3 | envelope=encryption | 2701.21 | 158.98 | 370.2 |  |
+| get_tuple | local | envelope=plain | 186.55 | 13.04 | 5360.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=compression | 190.44 | 14.10 | 5251.1 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=encryption | 215.03 | 14.88 | 4650.6 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | s3 | envelope=plain | 6683.05 | 289.84 | 149.6 |  |
+| get_tuple | s3 | envelope=compression | 6684.86 | 414.28 | 149.6 |  |
+| get_tuple | s3 | envelope=encryption | 6880.38 | 233.57 | 145.3 |  |
+| put_writes | local | envelope=plain | 152.53 | 23.85 | 6556.0 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put_writes | local | envelope=compression | 158.87 | 12.73 | 6294.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put_writes | local | envelope=encryption | 186.30 | 13.62 | 5367.6 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put_writes | s3 | envelope=plain | 2550.23 | 89.27 | 392.1 |  |
+| put_writes | s3 | envelope=compression | 2533.29 | 422.45 | 394.7 |  |
+| put_writes | s3 | envelope=encryption | 2661.21 | 393.69 | 375.8 |  |
+| put | local | envelope=plain, payload_size=small | 174.48 | 48.52 | 5731.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=plain, payload_size=medium | 169.98 | 13.45 | 5883.0 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=plain, payload_size=large | 292.62 | 168.14 | 3417.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=compression, payload_size=small | 175.05 | 12.13 | 5712.8 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=compression, payload_size=medium | 181.75 | 22.93 | 5502.2 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=compression, payload_size=large | 333.08 | 22.86 | 3002.3 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=encryption, payload_size=small | 206.97 | 16.99 | 4831.7 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=encryption, payload_size=medium | 205.11 | 15.05 | 4875.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | local | envelope=encryption, payload_size=large | 462.13 | 625.71 | 2163.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| put | s3 | envelope=plain, payload_size=small | 2608.71 | 104.19 | 383.3 |  |
+| put | s3 | envelope=plain, payload_size=medium | 2827.90 | 317.61 | 353.6 |  |
+| put | s3 | envelope=plain, payload_size=large | 6326.03 | 778.58 | 158.1 |  |
+| put | s3 | envelope=compression, payload_size=small | 2606.16 | 96.02 | 383.7 |  |
+| put | s3 | envelope=compression, payload_size=medium | 2619.20 | 134.76 | 381.8 |  |
+| put | s3 | envelope=compression, payload_size=large | 2694.78 | 82.62 | 371.1 |  |
+| put | s3 | envelope=encryption, payload_size=small | 2795.94 | 212.95 | 357.7 |  |
+| put | s3 | envelope=encryption, payload_size=medium | 2716.96 | 104.17 | 368.1 |  |
+| put | s3 | envelope=encryption, payload_size=large | 6609.88 | 959.95 | 151.3 |  |
+| get_tuple | local | envelope=plain, payload_size=small | 184.86 | 16.59 | 5409.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=plain, payload_size=medium | 183.06 | 14.88 | 5462.7 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=plain, payload_size=large | 250.36 | 16.29 | 3994.3 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=compression, payload_size=small | 185.16 | 14.53 | 5400.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=compression, payload_size=medium | 190.57 | 29.68 | 5247.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=compression, payload_size=large | 283.14 | 17.03 | 3531.9 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=encryption, payload_size=small | 213.79 | 22.68 | 4677.5 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=encryption, payload_size=medium | 215.84 | 18.63 | 4633.0 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | local | envelope=encryption, payload_size=large | 404.59 | 25.04 | 2471.6 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple | s3 | envelope=plain, payload_size=small | 6656.15 | 193.53 | 150.2 |  |
+| get_tuple | s3 | envelope=plain, payload_size=medium | 6820.87 | 1296.53 | 146.6 |  |
+| get_tuple | s3 | envelope=plain, payload_size=large | 8738.42 | 164.89 | 114.4 |  |
+| get_tuple | s3 | envelope=compression, payload_size=small | 6797.83 | 1321.62 | 147.1 |  |
+| get_tuple | s3 | envelope=compression, payload_size=medium | 6631.35 | 148.86 | 150.8 |  |
+| get_tuple | s3 | envelope=compression, payload_size=large | 7015.01 | 1485.27 | 142.6 |  |
+| get_tuple | s3 | envelope=encryption, payload_size=small | 6889.02 | 282.16 | 145.2 |  |
+| get_tuple | s3 | envelope=encryption, payload_size=medium | 8853.58 | 14973.55 | 112.9 |  |
+| get_tuple | s3 | envelope=encryption, payload_size=large | 9155.68 | 1494.45 | 109.2 |  |
+| get_tuple_latest | local | history_size=10 | 212.65 | 14.26 | 4702.6 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple_latest | local | history_size=100 | 478.30 | 22.23 | 2090.8 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple_latest | local | history_size=1000 | 3018.62 | 89.10 | 331.3 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| get_tuple_latest | s3 | history_size=10 | 8032.48 | 1412.90 | 124.5 |  |
+| get_tuple_latest | s3 | history_size=100 | 16024.56 | 1535.72 | 62.4 |  |
+| get_tuple_latest | s3 | history_size=1000 | 99254.45 | 33323.66 | 10.1 |  |
+| list_filter | local | history_size=10 | 709.50 | 229.21 | 1409.4 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| list_filter | local | history_size=100 | 5174.76 | 466.95 | 193.2 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| list_filter | local | history_size=1000 | 52266.19 | 1050.01 | 19.1 | [ADR 0006](docs/adr/0006-persistent-event-loop.md) |
+| list_filter | s3 | history_size=10 | 19705.82 | 541.82 | 50.7 |  |
+| list_filter | s3 | history_size=100 | 145612.52 | 2577.41 | 6.9 |  |
+| list_filter | s3 | history_size=1000 | 1452278.36 | 50613.10 | 0.7 |  |
 
 _Measured on 2026-09-05, on maintainer hardware against local disk and an in-process moto S3 emulator -- a relative comparison across operations/backends/envelopes, not an absolute production guarantee._
 <!-- BENCHMARK-RESULTS:END -->
@@ -616,6 +616,13 @@ glance.
 `s3` rows are against an in-process moto emulator, not real AWS S3. Fine
 for comparing operations, backends, and envelopes against each other; not
 a real-network latency estimate.
+
+`Notes` links to the ADR responsible for a row's numbers, when one
+applies. Every `local` row currently points to
+[ADR 0006](docs/adr/0006-persistent-event-loop.md): all local-disk sync
+calls share the same persistent background event loop it introduced, so
+that one change touches every operation on that backend, not just a
+specific one.
 
 Benchmarks cover the hot path (`put`/`get_tuple`/`put_writes`), the
 documented O(n) costs above (`list(filter=...)`, `get_tuple(latest)`) at a
