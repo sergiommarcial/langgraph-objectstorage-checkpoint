@@ -20,13 +20,16 @@ def test_gcs_protocol_resolves_to_gcsfs():
     not os.environ.get("GCS_TEST_BUCKET"),
     reason="set GCS_TEST_BUCKET (+ GCP credentials) to run real-bucket GCS conformance",
 )
-async def test_gcs_conformance():
+@pytest.mark.parametrize("compression", ["none", "zstd"])
+async def test_gcs_conformance(compression):
     bucket = os.environ["GCS_TEST_BUCKET"]
 
-    @checkpointer_test(name="ObjectStorageSaver-gcs")
+    @checkpointer_test(name=f"ObjectStorageSaver-gcs-{compression}")
     async def _gcs_checkpointer():
         prefix = f"{bucket}/{uuid.uuid4()}"
-        yield ObjectStorageSaver.from_conn_string(f"gcs://{prefix}")
+        yield ObjectStorageSaver.from_conn_string(
+            f"gcs://{prefix}", compression=compression
+        )
 
     report = await validate(_gcs_checkpointer, progress=ProgressCallbacks.default())
     report.print_report()
