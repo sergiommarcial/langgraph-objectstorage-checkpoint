@@ -445,6 +445,9 @@ backend-specific instead of one mechanism for all three.
 - [`0005-performance-benchmarks.md`](docs/adr/0005-performance-benchmarks.md)
   on the pytest-benchmark suite, its backend/envelope/scale matrix, and why
   CI regression gating and load testing are deferred.
+- [`0006-persistent-event-loop.md`](docs/adr/0006-persistent-event-loop.md)
+  on the persistent background event loop behind local-disk sync calls,
+  found via that benchmark suite's profiling.
 
 ## Runtime type checking
 
