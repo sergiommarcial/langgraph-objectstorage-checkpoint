@@ -9,6 +9,8 @@ which also updates this file).
 
 ## [Unreleased]
 
+## [0.1.14] - 2026-09-06
+
 ### Added
 
 - `export_thread`/`aexport_thread` and `import_thread`/`aimport_thread` on
