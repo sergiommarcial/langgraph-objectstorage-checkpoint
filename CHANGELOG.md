@@ -9,6 +9,8 @@ which also updates this file).
 
 ## [Unreleased]
 
+## [0.1.15] - 2026-09-06
+
 ### Added
 
 - `on_io` constructor option on `ObjectStorageSaver`/`from_conn_string`:
