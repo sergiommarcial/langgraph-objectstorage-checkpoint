@@ -9,8 +9,8 @@
 The README's Known limitations section already documents real costs:
 `list(filter=...)`'s O(n) client-side scan, and `get_tuple(latest)`'s
 full prefix listing on every resume. What it doesn't give a consumer is
-any way to actually see those costs happening in their own deployment,
-short of external network-level tracing they'd have to set up themselves.
+a way to see those costs happening in their own deployment -- short of
+setting up external network-level tracing themselves.
 
 `saver.py` already funnels every backend operation through one small
 bridge (`_cat`/`_pipe`/`_find`/`_find_detailed`/`_exists`/`_rm`,
@@ -41,13 +41,13 @@ Each bridge method wraps its existing body with timing and calls
 callback is configured. With no callback configured (the default), the
 only added cost is a `None` check.
 
-The bridge actually has six methods, not five --
-`_find_detailed` (used by `delete_expired`'s full-bucket scan) is a
-`find` call with `detail=True`, not a distinct operation, so it reports
-as `op="find"` rather than adding a sixth `IOEvent.op` value. An
-exception raised by `on_io` itself (as opposed to one from the I/O call
-it's observing) is logged at debug level and never propagates -- a
-broken observability callback must never break real I/O.
+The bridge has six methods, not five -- `_find_detailed` (used by
+`delete_expired`'s full-bucket scan) is a `find` call with
+`detail=True`, not a distinct operation, so it reports as `op="find"`
+rather than adding a sixth `IOEvent.op` value. An exception raised by
+`on_io` itself (as opposed to one from the I/O call it's observing) is
+logged at debug level and never propagates -- a broken observability
+callback must never break real I/O.
 
 All six methods share one `_timed_io` async context manager (`saver.py`)
 rather than repeating the same start/except/finally shape six times --
@@ -56,9 +56,9 @@ each method's body only fills in `count`/`nbytes` on a small mutable
 `BaseException`, not `Exception`: a cancelled task's
 `asyncio.CancelledError` (which subclasses `BaseException`, not
 `Exception`) must still reach `on_io` as the call's `error`, not look
-like a clean success, since the call never actually completed. It's
-always re-raised afterward, so this never changes what the caller sees
--- only what `on_io` is told. With no callback configured, `_timed_io`
+like a clean success, since the call never completed. It's always
+re-raised afterward, so this never changes what the caller sees --
+only what `on_io` is told. With no callback configured, `_timed_io`
 returns immediately, before touching `time.monotonic()` at all, so the
 "adds no overhead" claim above holds literally, not just approximately.
 
@@ -167,16 +167,16 @@ independent of, and not blocked by, that larger ADR.
 
 ## Follow-up / open questions
 
-- Resolved: `on_io` accepts a plain function or an `async def`. If the
-  callback returns an awaitable, it's awaited on the same coroutine/thread
-  as the I/O call it observed -- covers consumers doing async I/O inside
-  their hook (shipping events to a remote collector, for example) without
-  a second callback shape.
-- `otel_on_io_adapter` takes an optional `meter` alongside `tracer`:
-  spans are always emitted; a `duration` histogram, `bytes` counter, and
-  `count` histogram (keys scanned by `find`/`find_detailed` -- the number
-  behind this saver's one documented O(n) cost) are additionally recorded
-  when a `meter` is passed.
+- Resolved: `on_io` can be a plain function or an `async def`. An
+  awaitable return value is awaited on the same coroutine/thread as the
+  I/O call it observed. That covers a consumer doing async I/O inside
+  their hook -- shipping events to a remote collector, say -- without
+  needing a second callback shape.
+- `otel_on_io_adapter` takes an optional `meter` alongside `tracer`.
+  Spans are always emitted; passing `meter` additionally records a
+  `duration` histogram, a `bytes` counter, and a `count` histogram (keys
+  scanned by `find`/`find_detailed` -- the number behind this saver's one
+  documented O(n) cost).
 - `FileNotFoundError` is expected control flow for this saver (an empty
   thread's first `get_tuple`/`list`, or deleting an already-gone thread),
   not a real failure. `otel_on_io_adapter` still records it on the span
@@ -185,14 +185,14 @@ independent of, and not blocked by, that larger ADR.
   an exception that isn't `FileNotFoundError`. Getting this wrong would
   drown real failures in false positives for any alert keyed on error
   rate.
-- A cancelled call's `_emit_io` (see the `BaseException` handling above)
-  is scheduled as a fire-and-forget task rather than awaited inline when
-  the captured error is `asyncio.CancelledError`, so a slow `on_io` can't
-  delay the actual cancellation's unwind -- e.g. a `wait_for`-style
-  timeout waiting on a checkpoint write shouldn't also end up waiting on
-  an observability callback. The saver holds a strong reference to that
-  task (`_background_io_tasks`) until it finishes, since asyncio can
-  otherwise garbage-collect a pending task with no other referent.
+- When the captured error is `asyncio.CancelledError` (see the
+  `BaseException` handling above), `_emit_io` runs as a fire-and-forget
+  task instead of being awaited inline -- a slow `on_io` shouldn't be
+  able to delay the cancellation's own unwind. A `wait_for`-style timeout
+  on a checkpoint write, for instance, shouldn't also end up waiting on
+  an observability callback. The saver keeps a strong reference to that
+  task (`_background_io_tasks`) until it finishes; otherwise asyncio can
+  garbage-collect a still-pending task with nothing else holding onto it.
 - README's Observability section covers all of the above, plus
   exporter-configuration examples for Datadog, Prometheus, and Dynatrace
   (all consumer-side OTel exporter setup, not vendor-specific code in
