@@ -1,0 +1,16 @@
+[project]
+name = "objectstorage-checkpoint-example-uv-compression-encryption-observability"
+version = "0.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    "langgraph",
+    "langgraph-checkpoint-objectstorage[compression,encryption,observability]",
+    "opentelemetry-sdk",
+    "opentelemetry-exporter-prometheus",
+    "prometheus-client",
+]
+
+# Local path install -- swap for a normal PyPI dependency once the package
+# is published.
+[tool.uv.sources]
+langgraph-checkpoint-objectstorage = { path = "../../../", editable = true }

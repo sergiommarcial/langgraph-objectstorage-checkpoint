@@ -1,0 +1,15 @@
+services:
+
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: objectstorage-example-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    # `main.py`'s metrics endpoint runs on the host, not in this compose
+    # project. Docker Desktop (Mac/Windows) resolves host.docker.internal
+    # to it out of the box. Native Linux Docker Engine doesn't -- add
+    # `extra_hosts: ["host.docker.internal:host-gateway"]` there instead
+    # (Docker 20.10+; that mapping actively breaks Docker Desktop's own
+    # resolution, which is why it isn't included here unconditionally).

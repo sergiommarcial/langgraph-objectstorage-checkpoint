@@ -1,13 +1,23 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import threading
+import time
 import weakref
-from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 import fsspec
@@ -26,6 +36,7 @@ from langgraph.checkpoint.base import (
 from typeguard import typechecked
 
 from langgraph_checkpoint_objectstorage import archive, envelope, keys
+from langgraph_checkpoint_objectstorage.observability import IOEvent
 
 logger = logging.getLogger("langgraph_checkpoint_objectstorage")
 
@@ -84,6 +95,17 @@ def _source_thread_id(entries: dict[str, bytes]) -> str:
     return next(iter(thread_ids))
 
 
+class _IOTiming:
+    """Mutable slot an `_timed_io` body fills in as it learns count/nbytes."""
+
+    __slots__ = ("count", "nbytes", "error")
+
+    def __init__(self) -> None:
+        self.count: int | None = None
+        self.nbytes: int | None = None
+        self.error: BaseException | None = None
+
+
 _BG_LOOP_JOIN_TIMEOUT = 1.0
 
 
@@ -127,6 +149,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         ttl: timedelta | None = None,
         compression: str = "none",
         encryption: envelope.KeyProvider | None = None,
+        on_io: Callable[[IOEvent], None | Awaitable[None]] | None = None,
     ) -> None:
         """Wrap an existing fsspec filesystem as a checkpoint store.
 
@@ -168,6 +191,25 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 exact historical key, so key rotation and reading objects
                 written under a previous `KeyProvider` both work without a
                 migration step.
+            on_io: Called once per backend I/O call (`find`/`cat`/`pipe`/
+                `exists`/`rm`) with an `IOEvent` describing it -- op, key,
+                count (for `find`), nbytes (for `cat`/`pipe`), duration,
+                and the exception if the call failed (including a
+                cancelled call's `asyncio.CancelledError`). `None`
+                (default) adds no overhead. May be a plain function or an
+                `async def`; an awaitable return value is awaited on the
+                same coroutine/thread as the I/O call it observed. Runs
+                synchronously in the I/O path, so a slow `on_io` adds real
+                latency -- hand off to a queue yourself if you need to
+                ship events remotely. On local disk specifically, every
+                call shares one persistent background loop/thread per
+                saver instance (see ADR 0006), so a slow `on_io` there
+                stalls every other concurrent call on that instance, not
+                just the one it's timing. An exception raised by `on_io`
+                itself is logged at debug level and never propagates, so
+                a broken callback can't break real I/O. See
+                `otel_on_io_adapter` for a ready-made OpenTelemetry
+                adapter.
         """
         super().__init__()
         self.fs = fs
@@ -176,6 +218,12 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         self.compression = compression
         self._codec_name = envelope.resolve_codec(compression)
         self._key_provider = envelope.resolve_key_provider(encryption)
+        self._on_io = on_io
+        # Strong references for the fire-and-forget `_emit_io` tasks
+        # `_timed_io` schedules on cancellation (see there) -- otherwise
+        # asyncio can garbage-collect a task with no other referent while
+        # it's still pending.
+        self._background_io_tasks: set[asyncio.Task[None]] = set()
         self._is_async_native = isinstance(fs, AsyncFileSystem)
         self._bg_loop: asyncio.AbstractEventLoop | None = None
         self._bg_thread: threading.Thread | None = None
@@ -202,6 +250,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         ttl: timedelta | None = None,
         compression: str = "none",
         encryption: envelope.KeyProvider | None = None,
+        on_io: Callable[[IOEvent], None | Awaitable[None]] | None = None,
         **storage_options: Any,
     ) -> "ObjectStorageSaver":
         """Build a saver from an fsspec connection string.
@@ -221,6 +270,9 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 connection-string query parameter (a `KeyProvider` is an
                 object, not a string) -- pass it as a keyword argument
                 here.
+            on_io: Forwarded to `__init__` -- see its docstring. Like
+                `encryption`, this can't be embedded as a connection-string
+                query parameter -- pass it as a keyword argument here.
             **storage_options: Forwarded to the underlying fsspec
                 filesystem constructor -- useful for explicit credentials
                 or a custom S3-compatible endpoint (MinIO, etc.).
@@ -238,7 +290,14 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             )
         storage_options.setdefault("skip_instance_cache", True)
         fs, path = fsspec.core.url_to_fs(conn_string, **storage_options)
-        return cls(fs, path, ttl=ttl, compression=compression, encryption=encryption)
+        return cls(
+            fs,
+            path,
+            ttl=ttl,
+            compression=compression,
+            encryption=encryption,
+            on_io=on_io,
+        )
 
     def _ensure_bg_loop(self) -> asyncio.AbstractEventLoop:
         # Double-checked: the lock only matters for the first call from
@@ -277,70 +336,149 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             func, *args, key_provider=self._key_provider, **kwargs
         )
 
-    async def _cat(self, key: str) -> bytes:
+    @asynccontextmanager
+    async def _timed_io(
+        self, op: Literal["find", "cat", "pipe", "exists", "rm"], key: str
+    ):
+        # Skipped entirely -- no `monotonic()`, no wrapping -- when no
+        # callback is configured, so the documented "adds no overhead"
+        # default holds literally, not just approximately.
+        if self._on_io is None:
+            yield _IOTiming()
+            return
+        start = time.monotonic()
+        timing = _IOTiming()
         try:
-            if self._is_async_native:
-                data = await self.fs._cat_file(key)
-            else:
-                data = await asyncio.to_thread(self.fs.cat_file, key)
-        except FileNotFoundError:
-            logger.debug("cat key=%s -> not found", key)
+            yield timing
+        except BaseException as exc:
+            # BaseException, not Exception: a cancelled task's
+            # asyncio.CancelledError must still be reported to `on_io`
+            # rather than looking like a clean success. Always re-raised
+            # below, so this never changes what the caller sees.
+            timing.error = exc
             raise
-        logger.debug("cat key=%s -> %d bytes", key, len(data))
-        return data
+        finally:
+            emit = self._emit_io(
+                op,
+                key,
+                count=timing.count,
+                nbytes=timing.nbytes,
+                duration_ms=(time.monotonic() - start) * 1000,
+                error=timing.error,
+            )
+            if isinstance(timing.error, asyncio.CancelledError):
+                # A cancelled caller (e.g. a timed-out run) needs to
+                # unwind now, not whenever `on_io` gets around to
+                # finishing -- fire-and-forget instead of awaiting, so a
+                # slow callback can't turn "cancel this" into "cancel
+                # this, eventually."
+                task = asyncio.get_running_loop().create_task(emit)
+                self._background_io_tasks.add(task)
+                task.add_done_callback(self._background_io_tasks.discard)
+            else:
+                await emit
+
+    async def _emit_io(
+        self,
+        op: Literal["find", "cat", "pipe", "exists", "rm"],
+        key: str,
+        *,
+        count: int | None,
+        nbytes: int | None,
+        duration_ms: float,
+        error: BaseException | None,
+    ) -> None:
+        event = IOEvent(
+            op=op,
+            key=key,
+            count=count,
+            nbytes=nbytes,
+            duration_ms=duration_ms,
+            error=error,
+        )
+        try:
+            result = self._on_io(event)
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            logger.debug("on_io callback raised", exc_info=True)
+
+    async def _cat(self, key: str) -> bytes:
+        async with self._timed_io("cat", key) as io:
+            try:
+                if self._is_async_native:
+                    data = await self.fs._cat_file(key)
+                else:
+                    data = await asyncio.to_thread(self.fs.cat_file, key)
+            except FileNotFoundError:
+                logger.debug("cat key=%s -> not found", key)
+                raise
+            io.nbytes = len(data)
+            logger.debug("cat key=%s -> %d bytes", key, io.nbytes)
+            return data
 
     async def _pipe(self, key: str, data: bytes) -> None:
-        parent = key.rsplit("/", 1)[0]
-        if self._is_async_native:
-            await self.fs._makedirs(parent, exist_ok=True)
-            await self.fs._pipe_file(key, data)
-        else:
-            await asyncio.to_thread(self.fs.makedirs, parent, exist_ok=True)
-            await asyncio.to_thread(self.fs.pipe_file, key, data)
-        logger.debug("pipe key=%s <- %d bytes", key, len(data))
+        async with self._timed_io("pipe", key) as io:
+            parent = key.rsplit("/", 1)[0]
+            if self._is_async_native:
+                await self.fs._makedirs(parent, exist_ok=True)
+                await self.fs._pipe_file(key, data)
+            else:
+                await asyncio.to_thread(self.fs.makedirs, parent, exist_ok=True)
+                await asyncio.to_thread(self.fs.pipe_file, key, data)
+            io.nbytes = len(data)
+            logger.debug("pipe key=%s <- %d bytes", key, io.nbytes)
 
     async def _find(self, prefix: str) -> list[str]:
-        try:
-            if self._is_async_native:
-                found = await self.fs._find(prefix)
-            else:
-                found = await asyncio.to_thread(self.fs.find, prefix)
-        except FileNotFoundError:
-            logger.debug("find prefix=%s -> not found", prefix)
-            raise
-        logger.debug("find prefix=%s -> %d keys", prefix, len(found))
-        return found
+        async with self._timed_io("find", prefix) as io:
+            try:
+                if self._is_async_native:
+                    found = await self.fs._find(prefix)
+                else:
+                    found = await asyncio.to_thread(self.fs.find, prefix)
+            except FileNotFoundError:
+                logger.debug("find prefix=%s -> not found", prefix)
+                raise
+            io.count = len(found)
+            logger.debug("find prefix=%s -> %d keys", prefix, io.count)
+            return found
 
     async def _find_detailed(self, prefix: str) -> dict[str, dict[str, Any]]:
-        try:
-            if self._is_async_native:
-                found = await self.fs._find(prefix, detail=True)
-            else:
-                found = await asyncio.to_thread(self.fs.find, prefix, detail=True)
-        except FileNotFoundError:
-            logger.debug("find_detailed prefix=%s -> not found", prefix)
-            raise
-        logger.debug("find_detailed prefix=%s -> %d keys", prefix, len(found))
-        return found
+        # Reported as op="find": it's the same find call with detail=True,
+        # not a distinct operation worth its own IOEvent.op value.
+        async with self._timed_io("find", prefix) as io:
+            try:
+                if self._is_async_native:
+                    found = await self.fs._find(prefix, detail=True)
+                else:
+                    found = await asyncio.to_thread(self.fs.find, prefix, detail=True)
+            except FileNotFoundError:
+                logger.debug("find_detailed prefix=%s -> not found", prefix)
+                raise
+            io.count = len(found)
+            logger.debug("find_detailed prefix=%s -> %d keys", prefix, io.count)
+            return found
 
     async def _exists(self, key: str) -> bool:
-        if self._is_async_native:
-            result = await self.fs._exists(key)
-        else:
-            result = await asyncio.to_thread(self.fs.exists, key)
-        logger.debug("exists key=%s -> %s", key, result)
-        return result
+        async with self._timed_io("exists", key):
+            if self._is_async_native:
+                result = await self.fs._exists(key)
+            else:
+                result = await asyncio.to_thread(self.fs.exists, key)
+            logger.debug("exists key=%s -> %s", key, result)
+            return result
 
     async def _rm(self, prefix: str) -> None:
-        try:
-            if self._is_async_native:
-                await self.fs._rm(prefix, recursive=True)
-            else:
-                await asyncio.to_thread(self.fs.rm, prefix, recursive=True)
-        except FileNotFoundError:
-            logger.debug("rm prefix=%s -> not found", prefix)
-            raise
-        logger.debug("rm prefix=%s -> removed", prefix)
+        async with self._timed_io("rm", prefix):
+            try:
+                if self._is_async_native:
+                    await self.fs._rm(prefix, recursive=True)
+                else:
+                    await asyncio.to_thread(self.fs.rm, prefix, recursive=True)
+            except FileNotFoundError:
+                logger.debug("rm prefix=%s -> not found", prefix)
+                raise
+            logger.debug("rm prefix=%s -> removed", prefix)
 
     async def _read_pending_writes(
         self, thread_id: str, checkpoint_ns: str, checkpoint_id: str
@@ -456,12 +594,24 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         _check_safe_segment("checkpoint_id", checkpoint_id)
         _check_safe_segment("task_id", task_id)
         overwrite = all(channel in WRITES_IDX_MAP for channel, _ in writes)
+        existing: set[str] = set()
+        if not overwrite:
+            try:
+                existing = set(
+                    await self._find(
+                        keys.writes_prefix(
+                            self.root, thread_id, checkpoint_ns, checkpoint_id
+                        )
+                    )
+                )
+            except FileNotFoundError:
+                existing = set()
         for idx, (channel, value) in enumerate(writes):
             actual_idx = WRITES_IDX_MAP.get(channel, idx)
             key = keys.write_key(
                 self.root, thread_id, checkpoint_ns, checkpoint_id, task_id, actual_idx
             )
-            if not overwrite and await self._exists(key):
+            if not overwrite and key in existing:
                 logger.debug(
                     "put_writes task=%s channel=%s idx=%s -> skipped, write already exists",
                     task_id,
