@@ -32,12 +32,15 @@ logger = logging.getLogger("langgraph_checkpoint_objectstorage")
 _LOG_LEVEL_ENV = "LANGGRAPH_CHECKPOINT_OBJECTSTORAGE_LOG_LEVEL"
 
 
-def _check_no_slash(label: str, value: str) -> None:
-    if "/" in value:
+def _check_safe_segment(label: str, value: str, *, allow_empty: bool = False) -> None:
+    if value == "" and allow_empty:
+        return
+    if not keys.is_safe_segment(value):
         raise ValueError(
-            f"{label}={value!r} contains '/': this saver's key layout joins "
-            f"{label} with '/' as a path separator, so a value containing it "
-            f"can collide with a different thread_id/checkpoint_ns pair"
+            f"{label}={value!r} is not a valid path segment: this saver's key "
+            f"layout uses it as one segment of a '/'-joined path, so it must be "
+            f"non-empty, must not be '.' or '..', and may only contain letters, "
+            f"digits, and '.', ':', '-', '_'"
         )
 
 
@@ -45,8 +48,8 @@ def _thread_ns(config: RunnableConfig) -> tuple[str, str]:
     configurable = config["configurable"]
     thread_id = configurable["thread_id"]
     checkpoint_ns = configurable.get("checkpoint_ns", "")
-    _check_no_slash("thread_id", thread_id)
-    _check_no_slash("checkpoint_ns", checkpoint_ns)
+    _check_safe_segment("thread_id", thread_id)
+    _check_safe_segment("checkpoint_ns", checkpoint_ns, allow_empty=True)
     return thread_id, checkpoint_ns
 
 
@@ -374,6 +377,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
     ) -> RunnableConfig:
         thread_id, checkpoint_ns = _thread_ns(config)
         checkpoint_id = checkpoint["id"]
+        _check_safe_segment("checkpoint_id", checkpoint_id)
         parent_checkpoint_id = config["configurable"].get("checkpoint_id")
         full_metadata = get_checkpoint_metadata(config, metadata)
         key = keys.checkpoint_key(self.root, thread_id, checkpoint_ns, checkpoint_id)
@@ -409,6 +413,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             key = max(candidates)
             checkpoint_id = keys.checkpoint_id_from_key(key)
         else:
+            _check_safe_segment("checkpoint_id", checkpoint_id)
             key = keys.checkpoint_key(
                 self.root, thread_id, checkpoint_ns, checkpoint_id
             )
@@ -448,6 +453,8 @@ class ObjectStorageSaver(BaseCheckpointSaver):
     ) -> None:
         thread_id, checkpoint_ns = _thread_ns(config)
         checkpoint_id = config["configurable"]["checkpoint_id"]
+        _check_safe_segment("checkpoint_id", checkpoint_id)
+        _check_safe_segment("task_id", task_id)
         overwrite = all(channel in WRITES_IDX_MAP for channel, _ in writes)
         for idx, (channel, value) in enumerate(writes):
             actual_idx = WRITES_IDX_MAP.get(channel, idx)
@@ -525,7 +532,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 return
 
     async def _delete_thread(self, thread_id: str) -> None:
-        _check_no_slash("thread_id", thread_id)
+        _check_safe_segment("thread_id", thread_id)
         prefix = keys.thread_prefix(self.root, thread_id)
         try:
             await self._rm(prefix)
@@ -533,11 +540,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             pass
 
     async def _export_thread(self, thread_id: str) -> bytes:
-        if "/" in thread_id:
-            raise ValueError(
-                f"thread_id {thread_id!r} contains '/', which export_thread can't "
-                "represent unambiguously in an archive's flat path layout"
-            )
+        _check_safe_segment("thread_id", thread_id)
         prefix = keys.thread_prefix(self.root, thread_id)
         try:
             found = await self._find(prefix)
@@ -548,7 +551,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         entries = {}
         for key in found:
             data = await self._cat(key)
-            entries[key[len(self.root) + 1 :]] = data
+            entries[keys.relative_key(self.root, key)] = data
         return archive.pack(entries)
 
     async def _import_thread(
@@ -560,21 +563,25 @@ class ObjectStorageSaver(BaseCheckpointSaver):
     ) -> None:
         entries = archive.unpack(archive_bytes)
         source_thread_id = _source_thread_id(entries)
-        if dest_thread_id is not None and "/" in dest_thread_id:
-            raise ValueError(
-                f"dest_thread_id {dest_thread_id!r} contains '/', which "
-                "import_thread can't represent unambiguously in the "
-                "destination's flat path layout"
-            )
-        target_thread_id = dest_thread_id or source_thread_id
+        if dest_thread_id is not None:
+            _check_safe_segment("dest_thread_id", dest_thread_id)
+        target_thread_id = (
+            dest_thread_id if dest_thread_id is not None else source_thread_id
+        )
         dest_entries = {
-            f"{self.root}/{target_thread_id}{rel[len(source_thread_id):]}": data
+            keys.rekeyed_path(self.root, rel, target_thread_id): data
             for rel, data in entries.items()
         }
         if not overwrite:
-            for key in dest_entries:
-                if await self._exists(key):
-                    raise FileExistsError(key)
+            try:
+                existing = set(
+                    await self._find(keys.thread_prefix(self.root, target_thread_id))
+                )
+            except FileNotFoundError:
+                existing = set()
+            conflicts = existing & dest_entries.keys()
+            if conflicts:
+                raise FileExistsError(sorted(conflicts)[0])
         for key, data in dest_entries.items():
             await self._pipe(key, data)
 
@@ -641,14 +648,14 @@ class ObjectStorageSaver(BaseCheckpointSaver):
     @typechecked
     async def aimport_thread(
         self,
-        archive: bytes,
+        archive_bytes: bytes,
         *,
         dest_thread_id: str | None = None,
         overwrite: bool = False,
     ) -> None:
         """Async variant of `import_thread`. See `import_thread` for details."""
         await self._import_thread(
-            archive, dest_thread_id=dest_thread_id, overwrite=overwrite
+            archive_bytes, dest_thread_id=dest_thread_id, overwrite=overwrite
         )
 
     async def adelete_expired(self) -> None:
@@ -673,10 +680,14 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             "not found".
 
         Raises:
-            ValueError: If `thread_id` or `checkpoint_ns` contains `/` --
-                this saver's key layout joins them with `/`, so a value
-                containing it could collide with a different
-                thread_id/checkpoint_ns pair.
+            ValueError: If `thread_id` or an explicit `checkpoint_id` is
+                empty, `.`, `..`, or contains `/` or `\\`, or if
+                `checkpoint_ns` is `.`, `..`, or contains `/` or `\\`
+                (`checkpoint_ns=""`, the
+                default namespace, is always valid). This saver's key
+                layout uses each as one segment of a `/`-joined path, so a
+                value like that could collide with or escape a different
+                thread_id/checkpoint_ns/checkpoint_id's storage keys.
         """
         return self._run_sync(self._get_tuple, config)
 
@@ -708,10 +719,13 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             async code for true streaming.
 
         Raises:
-            ValueError: If `thread_id` or `checkpoint_ns` contains `/` --
-                this saver's key layout joins them with `/`, so a value
-                containing it could collide with a different
-                thread_id/checkpoint_ns pair.
+            ValueError: If `thread_id` is empty, `.`, `..`, or contains
+                `/` or `\\`, or if `checkpoint_ns` is `.`, `..`, or
+                contains `/` or `\\` (`checkpoint_ns=""`, the default
+                namespace, is always valid). This saver's key layout uses
+                each as one segment of a `/`-joined path, so a value like
+                that could collide with or escape a different
+                thread_id/checkpoint_ns pair's storage keys.
         """
 
         async def _collect() -> list[CheckpointTuple]:
@@ -750,10 +764,14 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             (`configurable.thread_id`/`checkpoint_ns`/`checkpoint_id`).
 
         Raises:
-            ValueError: If `thread_id` or `checkpoint_ns` contains `/` --
-                this saver's key layout joins them with `/`, so a value
-                containing it could collide with a different
-                thread_id/checkpoint_ns pair.
+            ValueError: If `thread_id` or `checkpoint["id"]` is empty,
+                `.`, `..`, or contains `/` or `\\`, or if `checkpoint_ns`
+                is `.`, `..`, or contains `/` or `\\` (`checkpoint_ns=""`,
+                the default
+                namespace, is always valid). This saver's key layout uses
+                each as one segment of a `/`-joined path, so a value like
+                that could collide with or escape a different
+                thread_id/checkpoint_ns/checkpoint_id's storage keys.
         """
         return self._run_sync(self._put, config, checkpoint, metadata, new_versions)
 
@@ -783,10 +801,14 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 `BaseCheckpointSaver` contract compatibility.
 
         Raises:
-            ValueError: If `thread_id` or `checkpoint_ns` contains `/` --
-                this saver's key layout joins them with `/`, so a value
-                containing it could collide with a different
-                thread_id/checkpoint_ns pair.
+            ValueError: If `thread_id`, `checkpoint_id`, or `task_id` is
+                empty, `.`, `..`, or contains `/` or `\\`, or if
+                `checkpoint_ns` is `.`, `..`, or contains `/` or `\\`
+                (`checkpoint_ns=""`, the
+                default namespace, is always valid). This saver's key
+                layout uses each as one segment of a `/`-joined path, so a
+                value like that could collide with or escape a different
+                thread/checkpoint/task's storage keys.
         """
         self._run_sync(self._put_writes, config, writes, task_id, task_path)
 
@@ -800,9 +822,11 @@ class ObjectStorageSaver(BaseCheckpointSaver):
             thread_id: The thread to delete.
 
         Raises:
-            ValueError: If `thread_id` contains `/` -- this saver's key
-                layout uses `/` as a path separator, so a value containing
-                it could collide with a different thread_id.
+            ValueError: If `thread_id` is empty, `.`, `..`, or contains
+                `/` or `\\` -- this saver's key layout uses it as one
+                segment of a `/`-joined path, so a value like that could
+                collide with or escape a different thread_id's storage
+                keys.
         """
         self._run_sync(self._delete_thread, thread_id)
 
@@ -825,15 +849,16 @@ class ObjectStorageSaver(BaseCheckpointSaver):
 
         Raises:
             KeyError: If `thread_id` has no checkpoints.
-            ValueError: If `thread_id` contains `/` -- the archive's flat
-                path layout can't represent it unambiguously.
+            ValueError: If `thread_id` is empty, `.`, `..`, or contains
+                `/` or `\\` -- the archive's flat path layout can't
+                represent it unambiguously.
         """
         return self._run_sync(self._export_thread, thread_id)
 
     @typechecked
     def import_thread(
         self,
-        archive: bytes,
+        archive_bytes: bytes,
         *,
         dest_thread_id: str | None = None,
         overwrite: bool = False,
@@ -841,7 +866,7 @@ class ObjectStorageSaver(BaseCheckpointSaver):
         """Import an archive produced by `export_thread`.
 
         Args:
-            archive: Bytes produced by a prior `export_thread` call.
+            archive_bytes: Bytes produced by a prior `export_thread` call.
             dest_thread_id: Thread to import into. Defaults to the
                 thread_id the archive was exported from. Renaming an
                 encrypted thread this way permanently breaks decryption
@@ -854,15 +879,16 @@ class ObjectStorageSaver(BaseCheckpointSaver):
                 `True` to replace existing data.
 
         Raises:
-            ValueError: If `archive` isn't a well-formed single-thread
-                archive (including an unsafe or malformed entry path), or
-                if `dest_thread_id` contains `/`.
+            ValueError: If `archive_bytes` isn't a well-formed
+                single-thread archive (including an unsafe or malformed
+                entry path), or if `dest_thread_id` is empty, `.`, `..`,
+                or contains `/` or `\\`.
             FileExistsError: If a destination key already exists and
                 `overwrite` is `False`.
         """
         self._run_sync(
             self._import_thread,
-            archive,
+            archive_bytes,
             dest_thread_id=dest_thread_id,
             overwrite=overwrite,
         )

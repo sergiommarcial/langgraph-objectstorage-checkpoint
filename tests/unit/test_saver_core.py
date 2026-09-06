@@ -338,7 +338,7 @@ async def test_import_thread_empty_archive_raises(tmp_path):
 
 async def test_export_thread_rejects_thread_id_containing_slash(tmp_path):
     saver = make_saver(tmp_path)
-    with pytest.raises(ValueError, match="contains '/'"):
+    with pytest.raises(ValueError, match="not a valid path segment"):
         await saver._export_thread("team/proj-1")
 
 
@@ -348,7 +348,7 @@ async def test_import_thread_rejects_dest_thread_id_containing_slash(tmp_path):
     await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
     packed = await saver._export_thread("t1")
 
-    with pytest.raises(ValueError, match="contains '/'"):
+    with pytest.raises(ValueError, match="not a valid path segment"):
         await saver._import_thread(packed, dest_thread_id="team/proj-1")
 
 
@@ -391,3 +391,113 @@ async def test_delete_thread_rejects_thread_id_containing_slash(tmp_path):
     saver = make_saver(tmp_path)
     with pytest.raises(ValueError, match="thread_id"):
         await saver._delete_thread("team/proj-1")
+
+
+async def test_put_rejects_checkpoint_id_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    with pytest.raises(ValueError, match="checkpoint_id"):
+        await saver._put(config, _checkpoint("../evil"), {"step": 0}, {})
+
+
+async def test_get_tuple_rejects_checkpoint_id_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    with pytest.raises(ValueError, match="checkpoint_id"):
+        await saver._get_tuple(
+            {
+                "configurable": {
+                    "thread_id": "t1",
+                    "checkpoint_ns": "",
+                    "checkpoint_id": "../evil",
+                }
+            }
+        )
+
+
+async def test_put_writes_rejects_checkpoint_id_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {
+        "configurable": {
+            "thread_id": "t1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "../evil",
+        }
+    }
+    with pytest.raises(ValueError, match="checkpoint_id"):
+        await saver._put_writes(config, [("ch", "val")], "task-1")
+
+
+async def test_put_writes_rejects_task_id_containing_slash(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {
+        "configurable": {
+            "thread_id": "t1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+        }
+    }
+    with pytest.raises(ValueError, match="task_id"):
+        await saver._put_writes(config, [("ch", "val")], "../evil-task")
+
+
+async def test_import_thread_rejects_bare_entry_with_no_nested_path(tmp_path):
+    saver = make_saver(tmp_path)
+    bad_archive = archive.pack({"t1": b"data"})
+    with pytest.raises(ValueError, match="not a thread-relative key"):
+        await saver._import_thread(bad_archive)
+
+
+async def test_import_thread_rejects_empty_dest_thread_id(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+    packed = await saver._export_thread("t1")
+
+    with pytest.raises(ValueError, match="not a valid path segment"):
+        await saver._import_thread(packed, dest_thread_id="")
+
+
+async def test_delete_thread_rejects_parent_directory_thread_id(tmp_path):
+    saver = make_saver(tmp_path)
+    with pytest.raises(ValueError, match="not a valid path segment"):
+        await saver._delete_thread("..")
+
+
+async def test_put_writes_rejects_parent_directory_task_id(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {
+        "configurable": {
+            "thread_id": "t1",
+            "checkpoint_ns": "",
+            "checkpoint_id": "ckpt-1",
+        }
+    }
+    with pytest.raises(ValueError, match="not a valid path segment"):
+        await saver._put_writes(config, [("ch", "val")], "..")
+
+
+async def test_export_thread_rejects_current_directory_thread_id(tmp_path):
+    saver = make_saver(tmp_path)
+    with pytest.raises(ValueError, match="not a valid path segment"):
+        await saver._export_thread(".")
+
+
+async def test_put_rejects_parent_directory_checkpoint_ns(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ".."}}
+    with pytest.raises(ValueError, match="not a valid path segment"):
+        await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+
+
+async def test_put_rejects_backslash_in_thread_id(tmp_path):
+    saver = make_saver(tmp_path)
+    config = {"configurable": {"thread_id": "..\\..\\evil", "checkpoint_ns": ""}}
+    with pytest.raises(ValueError, match="not a valid path segment"):
+        await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+
+
+async def test_import_thread_rejects_backslash_in_archive_entry_path(tmp_path):
+    saver = make_saver(tmp_path)
+    malicious = archive.pack({"evil\\..\\..\\pwned/checkpoints/ckpt-1.msgpack": b"x"})
+    with pytest.raises(ValueError, match="unsafe path"):
+        await saver._import_thread(malicious)

@@ -37,7 +37,7 @@ Add two public methods to `ObjectStorageSaver`:
 
 ```python
 def export_thread(self, thread_id: str) -> bytes: ...
-def import_thread(self, archive: bytes, *, dest_thread_id: str | None = None, overwrite: bool = False) -> None: ...
+def import_thread(self, archive_bytes: bytes, *, dest_thread_id: str | None = None, overwrite: bool = False) -> None: ...
 ```
 
 with `aexport_thread`/`aimport_thread` async variants following the
@@ -114,33 +114,160 @@ any `tarfile.TarError` (corrupt/non-tar bytes) into `ValueError`, so
 every way an `archive` argument can be malformed, not just the
 multiple-thread-ids case.
 
-### Input validation: thread_id can't contain `/`
+### Input validation: every identifier must be a safe path segment
 
-`export_thread` rejects a `thread_id` containing `/`, and `import_thread`
-rejects a `dest_thread_id` containing `/`, both with `ValueError`. The
-archive's paths are relative to `root` and encode `thread_id` as their
-first `/`-delimited segment (`keys.thread_id_from_relative_key`); a
-`thread_id` that itself contains `/` makes that encoding ambiguous --
-`import_thread` can't tell where the thread_id segment ends and the rest
-of the path (`checkpoint_ns`, `checkpoints`, ...) begins, and silently
-reconstructs the wrong destination path (only the first segment gets
-rewritten under `dest_thread_id`, leaving the rest of the original
-thread_id embedded where `checkpoint_ns` was expected). Rejecting at the
-`export_thread`/`import_thread` boundary closes this for the archive
-format specifically.
+`thread_id`, `checkpoint_id`, and `task_id` must each be a single,
+non-empty path segment: not `.`, not `..`, and not containing `/`.
+`checkpoint_ns` follows the same rule except `checkpoint_ns=""` (the
+default namespace) is always valid, since `keys.py` already special-cases
+an empty `checkpoint_ns` as "omit this segment" rather than joining it in
+literally. `export_thread`'s `thread_id` and `import_thread`'s
+`dest_thread_id` follow the same rule as `thread_id` above. All of these
+raise `ValueError` via a single shared helper, `_check_safe_segment(label,
+value, *, allow_empty=False)` (`saver.py`), called from `_thread_ns`,
+`_delete_thread`, `_export_thread`, `_import_thread`, and the
+`checkpoint_id`/`task_id` sites in `_put`/`_get_tuple`/`_put_writes`.
 
-The same ambiguity was also live for ordinary `put`/`get_tuple`/`list`/
-`put_writes`/`delete_thread` calls against a `thread_id` or
-`checkpoint_ns` containing `/` -- a pre-existing gap discovered while
-implementing this ADR, not introduced by it. That gap is closed too, in
-`_thread_ns`/`_delete_thread` (`saver.py`), by the same "reject `/` with
-`ValueError`" approach, rather than by changing the on-disk key format
-itself (`keys.py`'s `/`-joined layout is unchanged for every `thread_id`/
-`checkpoint_ns` that never contained `/`, which is every value that ever
-worked correctly). That fix is orthogonal to this ADR's own scope --
-it's a base-saver input-validation fix, not part of the export/import
-feature -- documented here only because this ADR's review is what
-surfaced it.
+This rule, and how it was arrived at, is worth spelling out. It took
+four review passes to get right, and each wrong intermediate version was
+independently confirmed exploitable by direct execution:
+
+1. **First pass:** reject `thread_id`/`dest_thread_id` containing `/`.
+   The motivation was the archive format specifically. Its paths are
+   relative to `root` and encode `thread_id` as their first `/`-delimited
+   segment (`keys.thread_id_from_relative_key`), so a `thread_id`
+   containing `/` makes that encoding ambiguous: `import_thread` can't
+   tell where the thread_id segment ends and the rest of the path
+   (`checkpoint_ns`, `checkpoints`, ...) begins, and silently
+   reconstructs the wrong destination path. While implementing this, the
+   same ambiguity turned out to already be live for ordinary
+   `put`/`get_tuple`/`list`/`put_writes`/`delete_thread` calls against a
+   `thread_id`/`checkpoint_ns` containing `/`. That's a pre-existing gap,
+   not introduced by this ADR, and it was closed the same way: reject
+   with `ValueError`, no on-disk format change (`keys.py`'s `/`-joined
+   layout is unchanged for every value that never contained `/`).
+2. **Second pass:** the first pass only checked `thread_id`/
+   `checkpoint_ns`. `checkpoint_id` (`_put`, the explicit-id branch of
+   `_get_tuple`, `_put_writes`) and `task_id` (`_put_writes`) were never
+   checked at all, since they don't flow through `_thread_ns`. Confirmed
+   by direct reproduction: a `checkpoint_id` of `"../../../../tmp/evil"`
+   passed to plain `put` -- no archive or import involved -- wrote a file
+   outside `root` entirely. This pass also folded the by-then-three
+   hand-rolled `"/" in value` checks (one each in `_thread_ns`,
+   `_export_thread`, `_import_thread`) into a single
+   `_check_no_slash(label, value)` helper, and fixed two more bugs found
+   alongside it, both in the archive path:
+   - `keys.thread_id_from_relative_key` accepted a bare segment with no
+     nested subpath (an archive entry literally named `"t1"` rather than
+     `"t1/checkpoints/..."`) as a valid thread_id. That made
+     `_import_thread` compute a destination path equal to the thread's
+     own prefix and crash with an undocumented `IsADirectoryError`
+     instead of the `ValueError` this ADR's contract promises. Fixed by
+     requiring an actual `/` followed by a non-empty remainder.
+   - `target_thread_id = dest_thread_id or source_thread_id` treated an
+     explicitly-passed empty string the same as "not given" -- `or`
+     doesn't distinguish `""` from `None` -- silently reimporting under
+     the *source* thread_id instead of the empty string actually passed.
+     Fixed by checking `dest_thread_id is not None` instead.
+3. **Third pass:** the second pass's fix, and the "reject `/`" framing
+   generally, was still wrong. A bare `".."` or `"."` value contains no
+   `/` character of its own, since the surrounding key-building f-string
+   already supplies the slashes on both sides of it, so `"/" in value`
+   never catches it. Confirmed by direct reproduction of three distinct
+   consequences:
+   - `delete_thread("..")` recursively deleted everything next to
+     `root`, not just the checkpoint store.
+   - `put_writes` with `task_id=".."` escaped the intended
+     per-checkpoint writes subdirectory, landing writes for different
+     checkpoints in the same location.
+   - The second pass's own `dest_thread_id is not None` fix made
+     `dest_thread_id=""` a *reachable, accepted* value. But an empty
+     segment collapses the surrounding `//` the same way `"."` does,
+     silently landing an imported thread's checkpoints inside a
+     *different*, unrelated, pre-existing thread whose name matched
+     whatever path segment came after the empty one.
+
+   `_check_no_slash` was replaced with `_check_safe_segment`, described
+   above, and `archive.py`'s own `_is_safe_path` (used by `unpack`, see
+   the previous section) was extended to also reject a bare `.` path
+   component -- the identical gap, for archive entry paths.
+4. **Fourth pass:** the third pass's blocklist (`/`, `.`, `..`) still
+   missed `\`. On a local-disk deployment where the underlying OS treats
+   backslash as a path separator (Windows -- not this project's supported
+   platform, per the README's OS badge, but the local-disk backend runs
+   on whatever OS Python is running on, and the fix costs nothing for any
+   legitimate identifier), a `thread_id`/`checkpoint_id`/`task_id` like
+   `"..\\..\\evil"` passed every check so far. On such a deployment it
+   would write outside `root` the same way a literal `/`-based `..` does
+   on Linux/macOS. Confirmed by direct execution:
+   `_check_safe_segment("thread_id", "..\\..\\etc")` raised nothing, and
+   `archive._is_safe_path` accepted an archive entry path built the same
+   way.
+
+   Rather than add `\` as a fourth blocklisted character -- the pattern
+   by this point being "find one more dangerous value, add one more
+   special case" -- this pass switched to an allowlist.
+   `keys.is_safe_segment(value)` (new function in `keys.py`, the natural
+   home for path-segment rules alongside `thread_id_from_relative_key`
+   and friends) accepts only letters (any script; this does not restrict
+   to ASCII), digits, and `. : - _`, and still separately checks that the
+   value isn't `.` or `..` on its own -- an allowlist charset alone
+   doesn't rule out a value made entirely of allowed characters that's
+   still exactly `.` or `..`. `_check_safe_segment` (`saver.py`) and
+   `archive.py`'s `_is_safe_path` both call it now, closing `/`, `\`, NUL
+   bytes, and every other non-matching character in one place instead of
+   continuing to enumerate them. Verified directly: values like
+   `"evil\x00null"`, `"evil*star"`, and `"evil\nline"` -- none considered
+   in any earlier pass -- are all rejected, while every character
+   actually used by this project's own tests and examples (`"child:1"`,
+   `"ckpt-1"`, `"task_id"`) still passes.
+
+Two takeaways generalize past this specific bug. First: "reject a
+character" and "reject a value" are different checks, and a
+path-segment safety rule needs the latter -- `.` and `..` are dangerous
+as whole segment *values*, not because of any character they contain.
+Second, and broader: a blocklist only closes the gaps someone has
+already thought of, while an allowlist closes everything not already
+considered *safe* -- at the cost of being more restrictive than a
+consumer's existing usage might expect. That's a real, deliberate
+tradeoff, not a free upgrade. `checkpoint_ns` values like `"child:1"`
+(this project's own subgraph-namespace convention) and UUID-shaped
+`checkpoint_id`s both fit inside `. : - _` plus alphanumerics; an
+identifier scheme relying on other punctuation (email addresses, `@`/`+`
+in a slug, etc.) would need to change to use this saver.
+
+### A related, narrower gap: Unicode normalization (documented, not fixed)
+
+The fourth pass's allowlist review also surfaced (and left unaddressed)
+a different kind of collision: two byte-distinct strings that *look*
+identical because they use different Unicode normalization forms of the
+same characters (a precomposed "é", U+00E9, vs. the same letter spelled
+as "e" + a combining acute accent, U+0065 U+0301) both pass
+`keys.is_safe_segment` -- neither contains a disallowed character -- but
+some filesystems (notably macOS's HFS+/APFS) normalize filenames on
+write, so two thread_ids that look the same to a human, and are
+byte-distinct in Python, can resolve to the identical on-disk path.
+Verified directly on such a filesystem: writing under one normalization
+form and reading back via the other returns the same file.
+
+This is deliberately left as a documented limitation (see the README's
+Known limitations) rather than fixed by normalizing every identifier
+(e.g. to NFC) before use, for two reasons. First, scope: it isn't
+reproducible on any of this project's tested targets -- Linux local disk
+(most Linux filesystems, including ext4, store the exact byte sequence
+with no normalization) or S3/GCS (both are also byte-exact key stores,
+no normalization at all) -- only a macOS-local-disk deployment is
+affected. Second, cost: silently normalizing a caller's exact string
+before storing it is a different kind of behavior change than rejecting
+an unsafe value outright (this ADR's approach everywhere else) -- it
+changes what identifier a caller's string actually maps to, and
+normalization has its own edge cases (some combining-character sequences
+don't round-trip through NFC/NFD cleanly). Given the narrow,
+platform-specific reproduction and the real cost of the alternative,
+documenting it matches how this project already handles other
+OS/filesystem-level tradeoffs (see the sync/async event-loop warning and
+the same-thread concurrent-writer race in the README) rather than
+building around every one of them in code.
 
 ### Why raw bytes instead of re-serializing through the public API
 
@@ -277,6 +404,7 @@ SlateDB landing first.
   whole archive in memory is an accepted limitation for now, in the same
   spirit as `list(filter=...)`'s documented O(n) scan. Worth revisiting
   if real thread sizes make it a problem.
-- README's Architecture decision records section links this ADR; a fuller
-  usage section (mirroring how `compression`/`encryption` are documented)
-  is still needed once this actually ships.
+- Done: the README has both an Architecture decision records entry
+  linking this ADR and a full Thread export and import section
+  (mirroring how `compression`/`encryption` are documented), added once
+  this shipped.

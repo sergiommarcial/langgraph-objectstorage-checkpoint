@@ -46,6 +46,20 @@ def test_unpack_rejects_absolute_path():
         archive.unpack(malicious)
 
 
+def test_unpack_rejects_current_directory_component():
+    malicious = _raw_tar_with_member("t1/./checkpoints/ckpt-1.msgpack", b"data")
+    with pytest.raises(ValueError, match="unsafe path"):
+        archive.unpack(malicious)
+
+
+def test_unpack_rejects_backslash_in_path():
+    malicious = _raw_tar_with_member(
+        "evil\\..\\..\\pwned/checkpoints/ckpt-1.msgpack", b"data"
+    )
+    with pytest.raises(ValueError, match="unsafe path"):
+        archive.unpack(malicious)
+
+
 def test_unpack_rejects_non_tar_bytes():
     with pytest.raises(ValueError, match="not a valid archive"):
         archive.unpack(b"not a tar file")

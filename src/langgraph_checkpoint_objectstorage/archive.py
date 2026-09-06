@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 import tarfile
 
+from langgraph_checkpoint_objectstorage import keys
+
 
 def pack(entries: dict[str, bytes]) -> bytes:
     buffer = io.BytesIO()
@@ -33,4 +35,4 @@ def unpack(archive: bytes) -> dict[str, bytes]:
 def _is_safe_path(path: str) -> bool:
     if path.startswith("/"):
         return False
-    return all(part not in ("", "..") for part in path.split("/"))
+    return all(keys.is_safe_segment(part) for part in path.split("/"))
