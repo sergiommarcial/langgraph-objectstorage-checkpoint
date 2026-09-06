@@ -9,6 +9,16 @@ which also updates this file).
 
 ## [Unreleased]
 
+### Added
+
+- `on_io` constructor option on `ObjectStorageSaver`/`from_conn_string`:
+  a callback (sync or `async def`) invoked once per backend I/O call
+  (`find`/`cat`/`pipe`/`exists`/`rm`) with an `IOEvent` (op, key, count,
+  nbytes, duration, error). `otel_on_io_adapter(tracer, meter=None)` in
+  the new `observability` extra turns those events into OpenTelemetry
+  spans and, optionally, duration/bytes/count metrics. See
+  [ADR 0008](docs/adr/0008-io-observability.md).
+
 ## [0.1.14] - 2026-09-06
 
 ### Added

@@ -27,6 +27,7 @@ bucket you probably already have.**
 - [Compression](#-compression)
 - [Encryption](#-encryption)
 - [Thread export and import](#-thread-export-and-import)
+- [Observability](#-observability)
 - [Architecture](#architecture)
 - [Architecture decision records](#architecture-decision-records)
 - [Runtime type checking](#runtime-type-checking)
@@ -88,6 +89,7 @@ pip install langgraph-checkpoint-objectstorage        # local filesystem only
 pip install "langgraph-checkpoint-objectstorage[s3]"   # + AWS S3
 pip install "langgraph-checkpoint-objectstorage[gcs]"  # + Google Cloud Storage
 pip install "langgraph-checkpoint-objectstorage[compression]"  # + zstd codec
+pip install "langgraph-checkpoint-objectstorage[observability]"  # + OTel adapter
 ```
 
 ## ⚡ Quickstart
@@ -147,6 +149,12 @@ difference on disk.
 For [encryption](#-encryption): [`examples/uv/encryption`](examples/uv/encryption)
 writes the same checkpoint with and without it, and checks whether a known
 plaintext value shows up in the raw object on disk either way.
+
+For all three together: [`examples/uv/compression-encryption-observability`](examples/uv/compression-encryption-observability)
+configures one saver with `compression`, `encryption`, and `on_io` at
+once, wiring `otel_on_io_adapter` to a real Prometheus (via `docker
+compose`) to show the checkpoint I/O -- byte counts, call counts,
+durations -- in an actual dashboard.
 
 ## Choosing a backend
 
@@ -396,6 +404,124 @@ anything; pass `overwrite=True` to replace it.
 > different `BaseCheckpointSaver` implementation like the official
 > Postgres/SQLite savers.
 
+## 📈 Observability
+
+Pass `on_io` to see the cost of every backend call (`find`/`cat`/`pipe`/
+`exists`/`rm`) as it happens -- key, byte counts, duration, and any error:
+
+```python
+def log_io(event):
+    print(f"{event.op} {event.key} {event.duration_ms:.1f}ms err={event.error}")
+
+saver = ObjectStorageSaver.from_conn_string(
+    "s3://my-bucket/checkpoints",
+    on_io=log_io,
+)
+```
+
+`on_io=None` (the default) is byte-identical to every release before this
+option existed. `on_io` can be a plain function or an `async def` -- an
+awaitable return value is awaited on the same coroutine/thread as the I/O
+call it observed. It runs synchronously in the I/O path, so keep it fast;
+an exception it raises (or a cancelled call's `asyncio.CancelledError`,
+which `on_io` still sees) is logged and swallowed rather than breaking the
+real I/O call.
+
+> [!NOTE]
+> On local disk, every call on a saver instance shares one persistent
+> background loop/thread (see [ADR 0006](docs/adr/0006-persistent-event-loop.md)),
+> so a slow `on_io` there stalls every other concurrent call on that
+> instance, not just the one it's timing.
+
+Requires no dependency by itself. For OpenTelemetry, `otel_on_io_adapter`
+ships one ready-made adapter (requires the `observability` extra):
+
+```python
+from opentelemetry import trace
+from langgraph_checkpoint_objectstorage import otel_on_io_adapter
+
+tracer = trace.get_tracer("my-app")
+saver = ObjectStorageSaver.from_conn_string(
+    "s3://my-bucket/checkpoints",
+    on_io=otel_on_io_adapter(tracer),
+)
+```
+
+Pass `meter=` too to also record an `objectstorage.io.duration` histogram,
+an `objectstorage.io.bytes` counter, and an `objectstorage.io.count`
+histogram (keys scanned per `find`/`list`/TTL sweep -- the number behind
+this saver's one documented O(n) cost), all tagged by `op`:
+
+```python
+saver = ObjectStorageSaver.from_conn_string(
+    "s3://my-bucket/checkpoints",
+    on_io=otel_on_io_adapter(tracer, meter=meter_provider.get_meter("my-app")),
+)
+```
+
+A `FileNotFoundError` -- this saver's normal "nothing here yet" signal for
+an empty thread's first read, or deleting an already-gone thread -- is
+recorded on the span for context but never flips its status to `ERROR` or
+the metrics' `error` attribute to `true`; only a real failure does. A
+cancelled call (e.g. a timed-out run) still reaches `on_io` too, but the
+adapter's own span/metric work for it runs detached from the
+cancellation's unwind, so a slow `on_io` can't turn "cancel this" into
+"cancel this, eventually."
+
+Getting these spans/metrics into a specific backend is exporter
+configuration on your side -- the adapter above is backend-neutral. A few
+common setups:
+
+```python
+# Datadog -- OTLP intake via the Datadog Agent (default gRPC port 4317)
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+from opentelemetry.sdk.metrics import MeterProvider
+from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+
+tracer_provider = TracerProvider()
+tracer_provider.add_span_processor(
+    BatchSpanProcessor(OTLPSpanExporter(endpoint="http://localhost:4317"))
+)
+meter_provider = MeterProvider(metric_readers=[
+    PeriodicExportingMetricReader(OTLPMetricExporter(endpoint="http://localhost:4317"))
+])
+saver = ObjectStorageSaver.from_conn_string(
+    "s3://my-bucket/checkpoints",
+    on_io=otel_on_io_adapter(
+        tracer_provider.get_tracer("objectstorage"),
+        meter=meter_provider.get_meter("objectstorage"),
+    ),
+)
+```
+
+```python
+# Prometheus -- pull-based, metrics only (spans need a separate tracing
+# backend such as Jaeger or Tempo -- Prometheus doesn't ingest traces)
+from opentelemetry.exporter.prometheus import PrometheusMetricReader
+from prometheus_client import start_http_server
+
+start_http_server(9464)  # scrape http://localhost:9464/metrics
+meter_provider = MeterProvider(metric_readers=[PrometheusMetricReader()])
+```
+
+```python
+# Dynatrace -- OTLP endpoint on your environment, with an API token
+OTLPSpanExporter(
+    endpoint="https://<environment-id>.live.dynatrace.com/api/v2/otlp/v1/traces",
+    headers={"Authorization": "Api-Token <token>"},
+)
+```
+
+> [!NOTE]
+> `IOEvent.count` (for `find`) and `.nbytes` (for `cat`/`pipe`) are exactly
+> the numbers behind the O(n) costs called out in
+> [Known limitations](#known-limitations) -- `on_io` is how you see them
+> in your own deployment instead of hitting them blind in production. See
+> [ADR 0008](docs/adr/0008-io-observability.md) for the full design.
+
 ## Architecture
 
 Business logic (key layout, filtering, ordering, idempotency) is written
@@ -490,6 +616,9 @@ backend-specific instead of one mechanism for all three.
   on the `export_thread`/`import_thread` design: raw-bytes tar archives,
   full-thread-only scope, and why renaming an encrypted thread on import
   is unsafe.
+- [`0008-io-observability.md`](docs/adr/0008-io-observability.md) on the
+  `on_io` callback hook and why OTel support is one adapter over that
+  callback rather than spans built directly into the saver.
 
 ## Runtime type checking
 

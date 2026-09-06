@@ -1,5 +1,7 @@
 import asyncio
 import gc
+import logging
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import fsspec
@@ -138,6 +140,25 @@ async def test_put_writes_special_channel_overwrites(tmp_path):
 
     writes = await saver._read_pending_writes("t1", "", "ckpt-1")
     assert writes == [("task-1", ERROR, "second error")]
+
+
+async def test_put_writes_checks_existing_via_single_find_not_per_write_exists(
+    tmp_path,
+):
+    events = []
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=events.append)
+    config = {"configurable": {"thread_id": "t1", "checkpoint_ns": ""}}
+    stored = await saver._put(config, _checkpoint("ckpt-1"), {"step": 0}, {})
+    events.clear()
+
+    await saver._put_writes(
+        stored, [("ch1", "v1"), ("ch2", "v2"), ("ch3", "v3")], "task-1"
+    )
+
+    ops = [event.op for event in events]
+    assert ops.count("exists") == 0
+    assert ops.count("find") == 1
 
 
 async def test_read_pending_writes_empty_when_none(tmp_path):
@@ -501,3 +522,226 @@ async def test_import_thread_rejects_backslash_in_archive_entry_path(tmp_path):
     malicious = archive.pack({"evil\\..\\..\\pwned/checkpoints/ckpt-1.msgpack": b"x"})
     with pytest.raises(ValueError, match="unsafe path"):
         await saver._import_thread(malicious)
+
+
+async def test_on_io_records_cat_hit_with_nbytes_and_duration(tmp_path):
+    events = []
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=events.append)
+    key = f"{saver.root}/some/key"
+    await saver._pipe(key, b"hello world")
+    events.clear()
+
+    data = await saver._cat(key)
+
+    assert data == b"hello world"
+    (event,) = events
+    assert event.op == "cat"
+    assert event.key == key
+    assert event.nbytes == 11
+    assert event.duration_ms >= 0
+    assert event.error is None
+
+
+async def test_on_io_records_cat_miss_with_error_when_key_not_found(tmp_path):
+    events = []
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=events.append)
+    key = f"{saver.root}/missing/key"
+
+    with pytest.raises(FileNotFoundError):
+        await saver._cat(key)
+
+    (event,) = events
+    assert event.op == "cat"
+    assert isinstance(event.error, FileNotFoundError)
+    assert event.nbytes is None
+
+
+async def test_on_io_records_find_detailed_scan_as_find_op(tmp_path):
+    events = []
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=events.append)
+    await saver._pipe(f"{saver.root}/a/k1", b"x")
+    await saver._pipe(f"{saver.root}/a/k2", b"y")
+    events.clear()
+
+    detail = await saver._find_detailed(saver.root)
+
+    assert len(detail) == 2
+    (event,) = events
+    assert event.op == "find"
+    assert event.count == 2
+
+
+async def test_on_io_callback_exception_is_swallowed_and_logged(tmp_path, caplog):
+    def bad_on_io(event):
+        raise RuntimeError("boom")
+
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=bad_on_io)
+    key = f"{saver.root}/k"
+
+    with caplog.at_level(logging.DEBUG, logger="langgraph_checkpoint_objectstorage"):
+        await saver._pipe(key, b"x")
+        data = await saver._cat(key)
+
+    assert data == b"x"
+    assert "on_io" in caplog.text
+
+
+async def test_on_io_supports_awaitable_callback(tmp_path):
+    events = []
+
+    async def async_on_io(event):
+        events.append(event)
+
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=async_on_io)
+    key = f"{saver.root}/k"
+
+    await saver._pipe(key, b"x")
+
+    (event,) = events
+    assert event.op == "pipe"
+    assert event.nbytes == 1
+
+
+async def test_on_io_records_cancelled_error_when_cat_task_is_cancelled(
+    tmp_path, monkeypatch
+):
+    events = []
+    # `fsspec.filesystem("file")` returns a process-wide cached singleton
+    # (no skip_instance_cache), so this must go through `monkeypatch` --
+    # not a raw attribute assignment -- or the slowed-down `cat_file`
+    # leaks into every other test that touches local disk afterward.
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=events.append)
+    key = f"{saver.root}/k"
+    await saver._pipe(key, b"x")
+    events.clear()
+
+    real_cat_file = fs.cat_file
+
+    def slow_cat_file(path, *args, **kwargs):
+        time.sleep(0.2)
+        return real_cat_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(fs, "cat_file", slow_cat_file)
+
+    task = asyncio.ensure_future(saver._cat(key))
+    await asyncio.sleep(0.02)
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    (event,) = events
+    assert event.op == "cat"
+    assert isinstance(event.error, asyncio.CancelledError)
+
+
+async def test_on_io_records_exists_check(tmp_path):
+    events = []
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=events.append)
+    key = f"{saver.root}/k"
+
+    exists = await saver._exists(key)
+
+    assert exists is False
+    (event,) = events
+    assert event.op == "exists"
+    assert event.error is None
+
+
+async def test_on_io_records_rm_removal(tmp_path):
+    events = []
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=events.append)
+    key = f"{saver.root}/k"
+    await saver._pipe(key, b"x")
+    events.clear()
+
+    await saver._rm(key)
+
+    (event,) = events
+    assert event.op == "rm"
+    assert event.error is None
+
+
+async def test_on_io_records_find_with_count_of_matched_keys(tmp_path):
+    events = []
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=events.append)
+    await saver._pipe(f"{saver.root}/a/k1", b"x")
+    await saver._pipe(f"{saver.root}/a/k2", b"y")
+    events.clear()
+
+    found = await saver._find(saver.root)
+
+    assert len(found) == 2
+    (event,) = events
+    assert event.op == "find"
+    assert event.count == 2
+
+
+async def test_on_io_records_pipe_error_when_write_fails(tmp_path, monkeypatch):
+    events = []
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path), on_io=events.append)
+    key = f"{saver.root}/k"
+
+    def failing_pipe_file(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(fs, "pipe_file", failing_pipe_file)
+
+    with pytest.raises(OSError):
+        await saver._pipe(key, b"x")
+
+    (event,) = events
+    assert event.op == "pipe"
+    assert isinstance(event.error, OSError)
+
+
+async def test_on_io_cancellation_does_not_wait_for_slow_async_callback(
+    tmp_path, monkeypatch
+):
+    fs = fsspec.filesystem("file")
+    saver = ObjectStorageSaver(fs, str(tmp_path))
+    key = f"{saver.root}/k"
+    await saver._pipe(key, b"x")
+
+    real_cat_file = fs.cat_file
+
+    def slow_cat_file(path, *args, **kwargs):
+        time.sleep(0.2)
+        return real_cat_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(fs, "cat_file", slow_cat_file)
+
+    callback_finished = asyncio.Event()
+
+    async def slow_on_io(event):
+        await asyncio.sleep(0.3)
+        callback_finished.set()
+
+    saver._on_io = slow_on_io
+
+    task = asyncio.ensure_future(saver._cat(key))
+    await asyncio.sleep(0.02)
+    task.cancel()
+
+    start = time.monotonic()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    unwind_duration = time.monotonic() - start
+
+    # Cancellation must not wait on the slow on_io callback (0.3s) -- only
+    # on the underlying I/O call's own (already in-flight) work.
+    assert unwind_duration < 0.3
+
+    # The callback isn't dropped either -- it still runs, just detached
+    # from the cancellation's unwind.
+    await asyncio.wait_for(callback_finished.wait(), timeout=1.0)

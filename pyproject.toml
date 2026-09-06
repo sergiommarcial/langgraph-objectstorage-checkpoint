@@ -28,6 +28,7 @@ s3 = ["s3fs>=2024.10.0"]
 gcs = ["gcsfs>=2024.10.0"]
 compression = ["zstandard>=0.22"]
 encryption = ["cryptography>=42"]
+observability = ["opentelemetry-api>=1.20"]
 
 [dependency-groups]
 dev = [
@@ -44,6 +45,7 @@ dev = [
     "pyflakes>=3.4.0",
     "vulture>=2.16",
     "black>=26.5.1",
+    "opentelemetry-sdk>=1.20",
 ]
 
 [tool.hatch.build.targets.wheel]
