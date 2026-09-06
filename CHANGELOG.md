@@ -16,7 +16,7 @@ which also updates this file).
   (`find`/`cat`/`pipe`/`exists`/`rm`) with an `IOEvent` (op, key, count,
   nbytes, duration, error). `otel_on_io_adapter(tracer, meter=None)` in
   the new `observability` extra turns those events into OpenTelemetry
-  spans and, optionally, a duration histogram and bytes counter. See
+  spans and, optionally, duration/bytes/count metrics. See
   [ADR 0008](docs/adr/0008-io-observability.md).
 
 ## [0.1.14] - 2026-09-06
