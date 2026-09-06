@@ -1,5 +1,13 @@
 from __future__ import annotations
 
+import re
+
+_SAFE_SEGMENT_RE = re.compile(r"[\w.:-]+")
+
+
+def is_safe_segment(value: str) -> bool:
+    return value not in (".", "..") and bool(_SAFE_SEGMENT_RE.fullmatch(value))
+
 
 def _thread_ns_root(root: str, thread_id: str, checkpoint_ns: str) -> str:
     parts = [root, thread_id]
@@ -54,3 +62,19 @@ def write_task_id_and_idx_from_key(key: str) -> tuple[str, int]:
 
 def thread_prefix(root: str, thread_id: str) -> str:
     return f"{root}/{thread_id}/"
+
+
+def thread_id_from_relative_key(relative_key: str) -> str:
+    thread_id, sep, rest = relative_key.partition("/")
+    if not sep or not rest:
+        raise ValueError(f"not a thread-relative key: {relative_key!r}")
+    return thread_id
+
+
+def relative_key(root: str, key: str) -> str:
+    return key[len(root) + 1 :]
+
+
+def rekeyed_path(root: str, relative_key: str, dest_thread_id: str) -> str:
+    _, _, rest = relative_key.partition("/")
+    return f"{root}/{dest_thread_id}/{rest}"

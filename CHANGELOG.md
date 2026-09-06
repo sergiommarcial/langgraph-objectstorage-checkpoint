@@ -9,11 +9,46 @@ which also updates this file).
 
 ## [Unreleased]
 
-## [0.1.13] - 2026-09-05
+### Added
 
-### Changed
+- `export_thread`/`aexport_thread` and `import_thread`/`aimport_thread` on
+  `ObjectStorageSaver`: pack a thread's full checkpoint/write history
+  (every `checkpoint_ns`) into a portable tar archive for backup, or to
+  move a thread between local disk, S3, and GCS. See
+  [ADR 0007](docs/adr/0007-thread-export-import.md).
 
-- No changelog entries were added for this release.
+### Fixed
+
+- `put`/`get_tuple`/`list`/`put_writes`/`delete_thread` (and their async
+  variants), and `export_thread`/`import_thread`, now raise `ValueError`
+  if `thread_id`, `checkpoint_id`, or `task_id` isn't a single path
+  segment matching letters, digits, and `. : - _` (and isn't `.` or `..`
+  on their own); `checkpoint_ns` follows the same rule except `""`, the
+  default namespace, is always valid. This saver's key layout joins these
+  values with `/` as a path separator, so a value outside that set could
+  collide with, or (containing `/`/`\` or equal to `..`) write or
+  recursively delete outside, a different thread/checkpoint/task's
+  storage keys. Confirmed by direct reproduction across three earlier,
+  narrower attempts at this same fix, each closing one concretely
+  demonstrated gap the previous one missed: checking only for a literal
+  `/` (missed `checkpoint_id`/`task_id` entirely, and missed that a bare
+  `.`/`..` value needs no `/` of its own); checking `.`/`..` too (missed
+  `\`, which is a path separator on Windows -- not this project's
+  supported platform, per the OS badge above, but cheap to close anyway
+  since it costs no legitimate identifier); landing on an allowlist
+  instead of continuing to blocklist individual characters, closing the
+  entire class (including characters no prior pass had considered, e.g.
+  NUL bytes) in one shot. No on-disk format change: every value that was
+  already alphanumeric plus `. : - _` is unaffected. See
+  [ADR 0007](docs/adr/0007-thread-export-import.md) for the full
+  round-by-round history, including the two rounds' worth of dead ends
+  kept for the record.
+- Documented (not fixed -- see ADR 0007) a related, narrower limitation
+  surfaced by the same review: two visually-identical identifier values
+  using different Unicode normalization forms can collide on a
+  normalizing local filesystem (macOS's HFS+/APFS). Not reproducible on
+  this project's tested targets (Linux local disk, S3, GCS), so this
+  saver does no normalization of its own.
 
 ## [0.1.12] - 2026-09-05
 
